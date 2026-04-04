@@ -1,0 +1,43 @@
+name: Deploy Backend To Railway
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "packages/backend/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/deploy-backend-railway.yml"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Build Backend
+        run: npm run build --workspace @clarityiq/backend
+
+      - name: Deploy To Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_SERVICE: ${{ secrets.RAILWAY_SERVICE }}
+        run: |
+          if [ -z "$RAILWAY_TOKEN" ] || [ -z "$RAILWAY_SERVICE" ]; then
+            echo "Missing Railway secrets. Set RAILWAY_TOKEN and RAILWAY_SERVICE."
+            exit 1
+          fi
+          npx @railway/cli up --service "$RAILWAY_SERVICE" --detach

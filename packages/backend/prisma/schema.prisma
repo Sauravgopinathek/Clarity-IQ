@@ -1,0 +1,41 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String    @id // Linked to Supabase Auth UID
+  email     String?   @unique
+  clients   Client[]
+  meetings  Meeting[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+model Client {
+  id        String    @id @default(uuid())
+  name      String
+  domain    String?
+  userId    String
+  user      User      @relation(fields: [userId], references: [id])
+  meetings  Meeting[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+model Meeting {
+  id          String   @id @default(uuid())
+  audioUrl    String
+  summaryJson Json?
+  clientId    String
+  client      Client   @relation(fields: [clientId], references: [id])
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}

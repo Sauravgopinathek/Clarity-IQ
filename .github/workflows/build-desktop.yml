@@ -1,0 +1,39 @@
+name: Build Desktop
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "packages/desktop/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/build-desktop.yml"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Build Electron App
+        run: npm run build --workspace @clarityiq/desktop
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: clarityiq-desktop-windows
+          path: packages/desktop/release
+          if-no-files-found: error

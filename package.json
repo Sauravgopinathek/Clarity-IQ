@@ -1,0 +1,18 @@
+{
+  "name": "clarityiq",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "node scripts/dev-runner.mjs app",
+    "dev:backend": "npm run dev --workspace @clarityiq/backend",
+    "dev:desktop": "npm run electron:dev --workspace @clarityiq/desktop",
+    "dev:app": "node scripts/dev-runner.mjs app",
+    "build": "npm run build --workspace @clarityiq/backend && npm run build --workspace @clarityiq/desktop",
+    "typecheck": "npm run typecheck:backend && npm run typecheck:desktop",
+    "typecheck:backend": ".\\node_modules\\.bin\\tsc.cmd -p packages\\backend\\tsconfig.json",
+    "typecheck:desktop": ".\\node_modules\\.bin\\tsc.cmd -p packages\\desktop\\tsconfig.json && .\\node_modules\\.bin\\tsc.cmd -p packages\\desktop\\tsconfig.node.json"
+  }
+}
