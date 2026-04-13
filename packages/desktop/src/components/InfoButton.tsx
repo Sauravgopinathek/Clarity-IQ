@@ -2,7 +2,7 @@ import React from 'react';
 import { Info } from 'lucide-react';
 
 type InfoButtonProps = {
-  onClick: () => void;
+  onClick: (e?: React.MouseEvent) => void;
   size?: number;
   color?: string;
   hoverColor?: string;
@@ -41,7 +41,7 @@ export default function InfoButton({
       }}
       onClick={(e) => {
         e.stopPropagation();
-        onClick();
+        onClick(e);
       }}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}

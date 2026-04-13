@@ -7,6 +7,27 @@ type MeetingSummary = {
   createdAt: Date;
 };
 
+// Evidence excerpt for KPI drill-down
+type EvidenceExcerpt = {
+  quote: string;           // Exact quote from transcript
+  speaker: 'buyer' | 'rep' | 'unknown';
+  sentiment: 'positive' | 'neutral' | 'negative';
+  relevance: string;       // Why this quote matters for the KPI
+  timestamp?: string;      // Approximate position in conversation
+};
+
+// Evidence map for all KPIs
+type KpiEvidence = {
+  sentimentScore?: EvidenceExcerpt[];
+  momentumScore?: EvidenceExcerpt[];
+  buyerEngagement?: EvidenceExcerpt[];
+  objectionHandling?: EvidenceExcerpt[];
+  buyingSignals?: EvidenceExcerpt[];
+  riskIndicators?: EvidenceExcerpt[];
+  customerIntent?: EvidenceExcerpt[];
+  repEffectiveness?: EvidenceExcerpt[];
+};
+
 type AnalysisResult = {
   bant: {
     budget: string;
@@ -58,6 +79,7 @@ type AnalysisResult = {
     buyerParticipationRate: number;
     buyerQuestionCount: number;
     interruptionPattern: string;
+    buyerQuestions?: string[];  // Actual questions asked by buyer
   };
   dealHealth?: {
     sentimentTrend: 'Improving' | 'Declining' | 'Stable';
@@ -96,6 +118,8 @@ type AnalysisResult = {
       spike: boolean;
     }>;
   };
+  // NEW: Evidence excerpts for KPI drill-down
+  evidence?: KpiEvidence;
   error?: string;
 };
 
@@ -756,6 +780,241 @@ export async function explainKpi(request: ExplanationRequest): Promise<Explanati
       kpiKey: request.kpiKey,
       kpiName: kpiMeta.name,
       explanation: `${kpiMeta.description} ${kpiMeta.businessContext}`
+    };
+  }
+}
+
+// KPI Evidence Extraction Types
+export type EvidenceExcerptResponse = {
+  quote: string;
+  speaker: 'buyer' | 'rep' | 'unknown';
+  sentiment: 'positive' | 'neutral' | 'negative';
+  relevance: string;
+  timestamp?: string;
+};
+
+export type KpiEvidenceResponse = {
+  kpiKey: string;
+  kpiName: string;
+  kpiValue?: string | number;
+  summary: string;
+  excerpts: EvidenceExcerptResponse[];
+  transcript: string;
+};
+
+// Map KPI keys to the relevant data paths in the analysis
+const KPI_EVIDENCE_CONFIG: Record<string, { name: string; focusAreas: string; extractionPrompt: string }> = {
+  sentimentScore: {
+    name: 'Sentiment Score',
+    focusAreas: 'emotional tone, positive/negative language, enthusiasm, frustration, satisfaction signals',
+    extractionPrompt: 'Extract quotes showing emotional tone - positive expressions (excitement, agreement, satisfaction) and negative expressions (frustration, skepticism, disappointment). Focus on buyer emotional state.'
+  },
+  momentumScore: {
+    name: 'Momentum Score',
+    focusAreas: 'deal progression signals, commitment language, next steps, urgency, stalling indicators',
+    extractionPrompt: 'Extract quotes showing deal momentum - forward movement signals (scheduling next steps, asking about implementation, discussing contracts) and stalling signals (postponement, uncertainty, need to consult others).'
+  },
+  buyerEngagement: {
+    name: 'Buyer Engagement',
+    focusAreas: 'buyer questions, participation level, active listening signals, interruption patterns',
+    extractionPrompt: 'Extract buyer questions and engagement signals - questions asked by buyer, expressions of interest, requests for clarification, and moments of active participation.'
+  },
+  buyerQuestionCount: {
+    name: 'Buyer Question Density',
+    focusAreas: 'all questions asked by the buyer, inquiry patterns, curiosity signals',
+    extractionPrompt: 'Extract ALL questions asked by the buyer during the conversation. Include direct questions and implied questions. Note the nature of each question (discovery, clarification, objection, buying signal).'
+  },
+  objectionResolution: {
+    name: 'Objection Handling',
+    focusAreas: 'objections raised, concerns expressed, how they were addressed, resolution success',
+    extractionPrompt: 'Extract objections and concerns raised by the buyer, followed by how the rep addressed them. Note whether each objection was resolved, partially addressed, or left unresolved.'
+  },
+  buyingSignals: {
+    name: 'Buying Signals',
+    focusAreas: 'budget mentions, timeline discussions, authority signals, competitive mentions',
+    extractionPrompt: 'Extract BANT-related signals - any discussion of budget/pricing, timeline/urgency, decision-making authority, and competitor mentions.'
+  },
+  customerIntent: {
+    name: 'Customer Intent',
+    focusAreas: 'buying intent signals, evaluation stage indicators, decision readiness',
+    extractionPrompt: 'Extract quotes indicating buyer intent - are they exploring, evaluating, ready to buy, or seeking support? Look for commitment language and decision signals.'
+  },
+  riskIndicators: {
+    name: 'Risk Indicators',
+    focusAreas: 'skepticism, confusion, over-promises, ghosting risk signals',
+    extractionPrompt: 'Extract warning signals - buyer skepticism, confusion moments, rep over-promising, and any indicators the buyer may disengage (vague responses, avoiding commitment).'
+  },
+  repEffectiveness: {
+    name: 'Rep Effectiveness',
+    focusAreas: 'discovery depth, value articulation, objection handling, next step clarity',
+    extractionPrompt: 'Extract examples of rep performance - good/poor discovery questions, how well they articulated value, objection handling quality, and clarity of proposed next steps.'
+  },
+  dealHealth: {
+    name: 'Deal Health',
+    focusAreas: 'overall deal progression, relationship quality, commitment level',
+    extractionPrompt: 'Extract quotes showing overall deal health - positive signs (engagement, commitment, enthusiasm) and concerning signs (hesitation, pushback, disengagement).'
+  },
+  talkToListenRatio: {
+    name: 'Talk-to-Listen Ratio',
+    focusAreas: 'speaking balance, who dominates conversation, listening quality',
+    extractionPrompt: 'Identify patterns showing who dominated the conversation. Extract examples of rep monologues, buyer extended responses, and conversational balance.'
+  }
+};
+
+async function extractKpiEvidenceWithGemini(
+  kpiKey: string,
+  kpiConfig: { name: string; focusAreas: string; extractionPrompt: string },
+  transcript: string,
+  meetingSummary: unknown,
+  kpiValue?: string | number
+): Promise<KpiEvidenceResponse> {
+  const ai = getGeminiClient();
+  const summaryContext = meetingSummary ? JSON.stringify(meetingSummary) : '{}';
+
+  const response = await ai.models.generateContent({
+    model: DEFAULT_MODEL,
+    contents: [
+      {
+        text: [
+          `You are analyzing a sales conversation transcript to extract evidence for the "${kpiConfig.name}" metric.`,
+          '',
+          '## Task',
+          kpiConfig.extractionPrompt,
+          '',
+          '## Focus Areas',
+          kpiConfig.focusAreas,
+          '',
+          kpiValue !== undefined ? `## Current KPI Value: ${kpiValue}` : '',
+          '',
+          '## Meeting Analysis Context',
+          summaryContext,
+          '',
+          '## Transcript',
+          transcript,
+          '',
+          '## Output Format',
+          'Return valid JSON with this exact structure:',
+          '{',
+          '  "summary": "2-3 sentence summary explaining how the conversation contributed to this KPI score",',
+          '  "excerpts": [',
+          '    {',
+          '      "quote": "Exact quote from transcript (keep concise, 1-3 sentences max)",',
+          '      "speaker": "buyer" or "rep" or "unknown",',
+          '      "sentiment": "positive" or "neutral" or "negative",',
+          '      "relevance": "Brief explanation of why this quote matters for this KPI"',
+          '    }',
+          '  ]',
+          '}',
+          '',
+          'Rules:',
+          '- Extract 3-8 most relevant excerpts, prioritizing the most impactful quotes',
+          '- Use exact quotes from the transcript (minor cleanup for readability is OK)',
+          '- Keep each quote concise - focus on the key phrase or statement',
+          '- Identify speaker as buyer/rep based on context',
+          '- Summary should directly explain the KPI score'
+        ].join('\n')
+      }
+    ],
+    config: {
+      responseMimeType: 'application/json',
+      temperature: 0.3
+    }
+  });
+
+  if (!response.text) {
+    throw new Error('Gemini returned an empty response');
+  }
+
+  const parsed = JSON.parse(response.text);
+  
+  // Normalize and validate the response
+  const excerpts: EvidenceExcerptResponse[] = Array.isArray(parsed.excerpts)
+    ? parsed.excerpts
+        .filter((e: any) => typeof e.quote === 'string' && e.quote.trim())
+        .map((e: any) => ({
+          quote: e.quote.trim(),
+          speaker: ['buyer', 'rep', 'unknown'].includes(e.speaker) ? e.speaker : 'unknown',
+          sentiment: ['positive', 'neutral', 'negative'].includes(e.sentiment) ? e.sentiment : 'neutral',
+          relevance: typeof e.relevance === 'string' ? e.relevance : '',
+          timestamp: typeof e.timestamp === 'string' ? e.timestamp : undefined
+        }))
+        .slice(0, 10)
+    : [];
+
+  return {
+    kpiKey,
+    kpiName: kpiConfig.name,
+    kpiValue,
+    summary: typeof parsed.summary === 'string' ? parsed.summary : `Analysis of ${kpiConfig.name} from conversation.`,
+    excerpts,
+    transcript
+  };
+}
+
+export type KpiEvidenceRequest = {
+  kpiKey: string;
+  transcript: string;
+  meetingSummary?: unknown;
+  kpiValue?: string | number;
+};
+
+export async function extractKpiEvidence(request: KpiEvidenceRequest): Promise<KpiEvidenceResponse> {
+  const apiKey = getGeminiApiKey();
+  const kpiConfig = KPI_EVIDENCE_CONFIG[request.kpiKey];
+
+  // Fallback for unknown KPI
+  if (!kpiConfig) {
+    return {
+      kpiKey: request.kpiKey,
+      kpiName: request.kpiKey,
+      kpiValue: request.kpiValue,
+      summary: 'Evidence extraction is not available for this metric.',
+      excerpts: [],
+      transcript: request.transcript
+    };
+  }
+
+  // No API key - return empty evidence
+  if (!apiKey) {
+    return {
+      kpiKey: request.kpiKey,
+      kpiName: kpiConfig.name,
+      kpiValue: request.kpiValue,
+      summary: 'AI analysis requires API key configuration.',
+      excerpts: [],
+      transcript: request.transcript
+    };
+  }
+
+  // No transcript available
+  if (!request.transcript || request.transcript.trim().length === 0) {
+    return {
+      kpiKey: request.kpiKey,
+      kpiName: kpiConfig.name,
+      kpiValue: request.kpiValue,
+      summary: 'No transcript available for this meeting. Evidence cannot be extracted.',
+      excerpts: [],
+      transcript: ''
+    };
+  }
+
+  try {
+    return await extractKpiEvidenceWithGemini(
+      request.kpiKey,
+      kpiConfig,
+      request.transcript,
+      request.meetingSummary,
+      request.kpiValue
+    );
+  } catch (error) {
+    console.error('Error extracting KPI evidence:', error);
+    return {
+      kpiKey: request.kpiKey,
+      kpiName: kpiConfig.name,
+      kpiValue: request.kpiValue,
+      summary: 'Unable to extract evidence at this time.',
+      excerpts: [],
+      transcript: request.transcript
     };
   }
 }

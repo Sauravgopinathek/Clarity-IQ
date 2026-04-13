@@ -3,7 +3,7 @@ import multer from 'multer';
 import { createClient } from '@supabase/supabase-js';
 import { prisma } from '../index';
 import { requireAuth } from '../middleware/auth';
-import { analyzeAudio, explainKpi } from '../services/ai';
+import { analyzeAudio, explainKpi, extractKpiEvidence } from '../services/ai';
 
 const router = Router();
 
@@ -199,6 +199,123 @@ router.post('/explain', async (req, res) => {
   } catch (error) {
     console.error('Error generating KPI explanation:', error);
     res.status(500).json({ error: 'Failed to generate explanation' });
+  }
+});
+
+// Extract KPI evidence from a meeting transcript (drill-down feature)
+router.post('/:meetingId/evidence', async (req, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const userId = req.user.sub;
+    const { meetingId } = req.params;
+    const { kpiKey, kpiValue } = req.body;
+
+    if (!kpiKey) {
+      return res.status(400).json({ error: 'kpiKey is required' });
+    }
+
+    // Fetch the meeting to get transcript and summary
+    const meeting = await prisma.meeting.findFirst({
+      where: { id: meetingId, userId }
+    });
+
+    if (!meeting) {
+      return res.status(404).json({ error: 'Meeting not found' });
+    }
+
+    const summaryJson = meeting.summaryJson as { transcript?: string } | null;
+    const transcript = summaryJson?.transcript || '';
+
+    if (!transcript) {
+      return res.status(400).json({ 
+        error: 'No transcript available for this meeting',
+        kpiKey,
+        kpiName: kpiKey,
+        summary: 'This meeting does not have a transcript available for evidence extraction.',
+        excerpts: [],
+        transcript: ''
+      });
+    }
+
+    const evidence = await extractKpiEvidence({
+      kpiKey,
+      transcript,
+      meetingSummary: meeting.summaryJson,
+      kpiValue
+    });
+
+    res.json(evidence);
+  } catch (error) {
+    console.error('Error extracting KPI evidence:', error);
+    res.status(500).json({ error: 'Failed to extract evidence' });
+  }
+});
+
+// Get the latest meeting's evidence for a KPI (for dashboard drill-down)
+router.post('/client/:clientId/evidence', async (req, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const userId = req.user.sub;
+    const { clientId } = req.params;
+    const { kpiKey, kpiValue } = req.body;
+
+    if (!kpiKey) {
+      return res.status(400).json({ error: 'kpiKey is required' });
+    }
+
+    // Fetch the latest meeting for this client
+    const meeting = await prisma.meeting.findFirst({
+      where: { clientId, userId },
+      orderBy: { createdAt: 'desc' }
+    });
+
+    if (!meeting) {
+      return res.status(404).json({ 
+        error: 'No meetings found for this client',
+        kpiKey,
+        kpiName: kpiKey,
+        summary: 'No meetings have been recorded for this client yet.',
+        excerpts: [],
+        transcript: ''
+      });
+    }
+
+    const summaryJson = meeting.summaryJson as { transcript?: string } | null;
+    const transcript = summaryJson?.transcript || '';
+
+    if (!transcript) {
+      return res.status(400).json({ 
+        error: 'No transcript available',
+        kpiKey,
+        kpiName: kpiKey,
+        summary: 'The latest meeting does not have a transcript available for evidence extraction.',
+        excerpts: [],
+        transcript: ''
+      });
+    }
+
+    const evidence = await extractKpiEvidence({
+      kpiKey,
+      transcript,
+      meetingSummary: meeting.summaryJson,
+      kpiValue
+    });
+
+    // Include meeting metadata
+    res.json({
+      ...evidence,
+      meetingId: meeting.id,
+      meetingDate: meeting.createdAt
+    });
+  } catch (error) {
+    console.error('Error extracting KPI evidence:', error);
+    res.status(500).json({ error: 'Failed to extract evidence' });
   }
 });
 

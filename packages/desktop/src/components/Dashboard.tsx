@@ -29,6 +29,7 @@ import { AudioEngine } from '../audio/AudioEngine';
 import { supabase } from '../App';
 import SentinelWidget from './SentinelWidget';
 import ExplanationModal, { ExplanationData } from './ExplanationModal';
+import DrillDownModal, { DrillDownData } from './DrillDownModal';
 import InfoButton from './InfoButton';
 import { getKpiMetadata } from './kpiMetadata';
 import { colors, baseStyles, getStatusColor, getStatusBg } from './styles';
@@ -187,6 +188,11 @@ export default function Dashboard({ session }: { session: any }) {
   const [explanationData, setExplanationData] = useState<ExplanationData | null>(null);
   const [explanationLoading, setExplanationLoading] = useState(false);
 
+  // Drill-down modal state
+  const [drillDownModalOpen, setDrillDownModalOpen] = useState(false);
+  const [drillDownData, setDrillDownData] = useState<DrillDownData | null>(null);
+  const [drillDownLoading, setDrillDownLoading] = useState(false);
+
   useEffect(() => { fetchClients(); }, [session]);
   useEffect(() => { if (selectedClient) fetchMeetings(selectedClient); }, [selectedClient]);
 
@@ -297,6 +303,80 @@ export default function Dashboard({ session }: { session: any }) {
       setExplanationLoading(false);
     }
   }, [backendUrl, session.access_token, clients, selectedClient, meetings]);
+
+  // Fetch KPI evidence for drill-down (clicking on a KPI card)
+  const fetchDrillDown = useCallback(async (kpiKey: string, kpiValue?: string | number, icon?: React.ReactNode) => {
+    if (!selectedClient) return;
+    
+    setDrillDownLoading(true);
+    setDrillDownModalOpen(true);
+    
+    const kpiMeta = getKpiMetadata(kpiKey);
+    
+    // Set initial data with loading state
+    setDrillDownData({
+      kpiKey,
+      kpiName: kpiMeta?.label || kpiKey,
+      kpiValue,
+      summary: '',
+      excerpts: [],
+      transcript: '',
+      icon,
+    });
+
+    try {
+      const res = await fetch(`${backendUrl}/meetings/client/${selectedClient}/evidence`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          kpiKey,
+          kpiValue,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setDrillDownData({
+          kpiKey: data.kpiKey,
+          kpiName: data.kpiName,
+          kpiValue: data.kpiValue,
+          summary: data.summary,
+          excerpts: data.excerpts || [],
+          transcript: data.transcript || '',
+          meetingId: data.meetingId,
+          meetingDate: data.meetingDate,
+          icon,
+        });
+      } else {
+        const errorData = await res.json().catch(() => ({}));
+        setDrillDownData({
+          kpiKey,
+          kpiName: kpiMeta?.label || kpiKey,
+          kpiValue,
+          summary: errorData.summary || 'Unable to extract evidence. Please ensure you have recorded meetings with transcripts.',
+          excerpts: [],
+          transcript: '',
+          icon,
+        });
+      }
+    } catch (e) {
+      console.error('Failed to fetch drill-down evidence', e);
+      setDrillDownData({
+        kpiKey,
+        kpiName: kpiMeta?.label || kpiKey,
+        kpiValue,
+        summary: 'Unable to fetch evidence. Please try again later.',
+        excerpts: [],
+        transcript: '',
+        icon,
+      });
+    } finally {
+      setDrillDownLoading(false);
+    }
+  }, [backendUrl, session.access_token, selectedClient]);
 
   const startMeeting = async () => {
     if (!selectedClient) return alert('Select a client first');
@@ -516,12 +596,27 @@ export default function Dashboard({ session }: { session: any }) {
             {/* KPI Cards Grid */}
             <div style={baseStyles.gridThree}>
               {kpis.map(({ key, label, value, helper, icon: Icon, accent }) => (
-                <div key={key} style={{ ...baseStyles.kpiCard, ':hover': baseStyles.cardHover }}>
+                <div 
+                  key={key} 
+                  style={{ ...baseStyles.kpiCard, cursor: 'pointer', transition: 'all 0.2s ease' }}
+                  onClick={() => fetchDrillDown(key, value, <Icon size={24} />)}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.transform = 'translateY(-2px)';
+                    e.currentTarget.style.boxShadow = '0 12px 40px rgba(0, 0, 0, 0.3)';
+                    e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.15)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.transform = 'translateY(0)';
+                    e.currentTarget.style.boxShadow = 'none';
+                    e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.08)';
+                  }}
+                  title="Click to see evidence from transcript"
+                >
                   <div style={{ position: 'absolute', top: 0, right: 0, width: '100px', height: '100px', background: `radial-gradient(circle at top right, ${accent}20, transparent)`, borderRadius: '0 20px 0 0' }} />
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem', position: 'relative' }}>
                     <span style={{ ...baseStyles.kpiLabel, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                       {label}
-                      <InfoButton onClick={() => fetchExplanation(key, value, <Icon size={24} />)} color={colors.textMuted} hoverColor={colors.primary} />
+                      <InfoButton onClick={(e) => { e.stopPropagation(); fetchExplanation(key, value, <Icon size={24} />); }} color={colors.textMuted} hoverColor={colors.primary} />
                     </span>
                     <div style={{ ...baseStyles.iconBox, background: `${accent}20`, color: accent }}>
                       <Icon size={22} />
@@ -811,6 +906,13 @@ export default function Dashboard({ session }: { session: any }) {
         onClose={() => setExplanationModalOpen(false)}
         data={explanationData}
         isLoading={explanationLoading}
+      />
+
+      <DrillDownModal
+        isOpen={drillDownModalOpen}
+        onClose={() => setDrillDownModalOpen(false)}
+        data={drillDownData}
+        isLoading={drillDownLoading}
       />
 
       <style>{`
