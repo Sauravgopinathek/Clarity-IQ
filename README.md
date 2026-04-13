@@ -53,7 +53,7 @@ npx prisma generate
 ```
 
 ### 4. Run Development Servers
-From the root directory:
+To run the project, execute the following command inside the main (root) folder:
 ```bash
 npm run dev
 ```
@@ -68,6 +68,12 @@ npm run dev:desktop
 ### 5. Typecheck
 ```bash
 npm run typecheck
+```
+
+### 6. Build
+To build both the backend and desktop applications (integrated build process), from the root directory run:
+```bash
+npm run build
 ```
 
 ## CI/CD Workflows
