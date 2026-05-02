@@ -1,6 +1,13 @@
-import { GoogleGenAI } from '@google/genai';
+import OpenAI from 'openai';
+import FormData from 'form-data';
+import Groq from 'groq-sdk';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
 
-const DEFAULT_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+const DEFAULT_MODEL = process.env.NVIDIA_LLM_MODEL || 'meta/llama-3.1-70b-instruct';
+const NVIDIA_ASR_URL = process.env.NVIDIA_ASR_URL || 'https://ai.api.nvidia.com/v1/audio/transcriptions';
+const NVIDIA_LLM_BASE_URL = process.env.NVIDIA_LLM_BASE_URL || 'https://integrate.api.nvidia.com/v1';
 
 type MeetingSummary = {
   summaryJson: unknown;
@@ -123,18 +130,43 @@ type AnalysisResult = {
   error?: string;
 };
 
-function getGeminiApiKey(): string {
-  return process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
+function getNvidiaApiKey(): string {
+  return process.env.NVIDIA_API_KEY || '';
 }
 
-function getGeminiClient(): GoogleGenAI {
-  const apiKey = getGeminiApiKey();
-  // The @google/genai SDK often gets confused if GOOGLE_API_KEY is present in the global env, 
-  // overriding what we pass in. So we explicitly delete it from the environment.
-  if (process.env.GOOGLE_API_KEY) {
-    delete process.env.GOOGLE_API_KEY;
+function getNvidiaLLMClient(): OpenAI {
+  return new OpenAI({
+    apiKey: getNvidiaApiKey(),
+    baseURL: NVIDIA_LLM_BASE_URL,
+  });
+}
+
+async function transcribeAudioWithGroq(audioBuffer: Buffer, mimeType: string): Promise<string> {
+  const groqApiKey = process.env.GROQ_API_KEY;
+  if (!groqApiKey) throw new Error('Missing GROQ_API_KEY');
+
+  const groq = new Groq({ apiKey: groqApiKey });
+  const ext = mimeType.includes('wav') ? 'wav' : 'webm';
+  const tempPath = path.join(os.tmpdir(), `clarityiq-${Date.now()}.${ext}`);
+  
+  fs.writeFileSync(tempPath, audioBuffer);
+
+  try {
+    const transcription = await groq.audio.transcriptions.create({
+      file: fs.createReadStream(tempPath),
+      model: 'whisper-large-v3',
+      language: 'en',
+      response_format: 'text'
+    });
+    // Cleanup temp file
+    fs.unlinkSync(tempPath);
+    return transcription as unknown as string;
+  } catch (error) {
+    // Cleanup temp file even on error
+    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+    console.error('Groq transcription error:', error);
+    throw new Error('Audio transcription failed via Groq');
   }
-  return new GoogleGenAI({ apiKey });
 }
 
 function getFallbackAnalysis(errorMessage: string, transcript = ''): AnalysisResult {
@@ -504,65 +536,72 @@ function buildHistoryPrompt(previousMeetingSummaries: MeetingSummary[]): string 
     .join('\n');
 }
 
-async function analyzeWithGemini(
+async function analyzeWithNvidia(
   audioBuffer: Buffer,
   mimeType: string,
   previousMeetingSummaries: MeetingSummary[]
 ): Promise<AnalysisResult> {
-  const ai = getGeminiClient();
+  // Phase 1: Speech-to-Text via Groq Whisper API
+  const transcript = await transcribeAudioWithGroq(audioBuffer, mimeType);
+
+  if (!transcript.trim()) {
+    return getFallbackAnalysis('Groq Whisper returned an empty transcript');
+  }
+
+  // Phase 2: Analyze transcript via NVIDIA NIM LLM
+  const client = getNvidiaLLMClient();
   const historyContext = buildHistoryPrompt(previousMeetingSummaries);
   const trackedTerms = getTrackedTerms();
   const trackedTermsPrompt = trackedTerms.length
     ? `Tracked terms to monitor for spikes: ${trackedTerms.join(', ')}`
     : 'Tracked terms to monitor for spikes: none configured.';
 
-  const response = await ai.models.generateContent({
+  const systemPrompt = [
+    'You analyze sales call transcripts and return only valid JSON.',
+    'Extract a structured analysis with this exact top-level shape:',
+    '{"bant":{"budget":"","authority":"","need":"","timeline":""},"vibe":{"score":0,"label":"","signals":[]},"dealArc":{"momentum":"Flat","resolvedObjections":[]},"sentiment":{"score":0,"label":"Neutral","trend":"Stable","stageSignals":[{"stage":"","score":0,"label":"Neutral"}]},"operational":{"interactionCount":1,"durationSeconds":0,"talkTimeSeconds":0,"holdTimeSeconds":0,"customerInitiated":true},"customerIntent":{"primary":"","confidence":0,"signals":[]},"objections":{"common":[],"unresolved":[],"frequency":0,"resolutionRate":0},"buyerEngagement":{"talkToListenRatio":"","buyerParticipationRate":0,"buyerQuestionCount":0,"interruptionPattern":""},"dealHealth":{"sentimentTrend":"Stable","momentumScore":0,"objectionFrequency":0,"objectionResolutionRate":0},"buyingSignals":{"budgetSignal":"","timelineSignal":"","authoritySignal":"","competitorMentions":[]},"repEffectiveness":{"discoveryDepthScore":0,"valueArticulationRate":0,"objectionHandlingQuality":"","nextStepClarityScore":0},"risk":{"riskyLanguage":[],"confusionPoints":[],"overpromiseFlags":[],"skepticismSignals":[],"ghostingRisk":"Medium"},"dimensions":{"product":"","geography":"","repTenure":""},"termMonitoring":{"trackedTerms":[{"term":"","mentions":0,"spike":false}]},"summary":"","transcript":""}',
+    'Rules:',
+    '- `vibe.score` must be an integer from 0 to 100.',
+    '- `vibe.label` must be one of Excited, Neutral, Skeptical.',
+    '- `dealArc.momentum` must be one of Increasing, Cooling, Flat.',
+    '- `sentiment.score`, `buyerParticipationRate`, `resolutionRate`, `momentumScore`, `discoveryDepthScore`, `valueArticulationRate`, and `nextStepClarityScore` must be integers from 0 to 100.',
+    '- `sentiment.label` and each stage signal label must be one of Positive, Neutral, Negative.',
+    '- `sentiment.trend` and `dealHealth.sentimentTrend` must be one of Improving, Declining, Stable.',
+    '- `risk.ghostingRisk` must be one of Low, Medium, High.',
+    '- `operational.interactionCount` should usually be 1 for a single uploaded meeting.',
+    '- If exact talk time or hold time cannot be determined, set them to 0.',
+    '- Infer customer intent using labels like Exploring, Evaluation, Buying, Renewal, Support, or Unknown.',
+    '- `dimensions.product`, `dimensions.geography`, and `dimensions.repTenure` should be concise and empty when unknown.',
+    '- `termMonitoring.trackedTerms` must only include configured tracked terms that are mentioned or show a likely spike relative to prior meetings.',
+    '- Keep `resolvedObjections` and `signals` concise.',
+    '- If a field is unknown, use an empty string or empty array.',
+    '- Summary should be 1 to 3 sentences and mention momentum relative to prior meetings when supported by context.',
+    '- The `transcript` field in your JSON output must contain the full transcript provided below.',
+    trackedTermsPrompt,
+    `Prior meeting context:\n${historyContext}`
+  ].join('\n');
+
+  const response = await client.chat.completions.create({
     model: DEFAULT_MODEL,
-    contents: [
-      {
-        text: [
-          'You analyze sales call audio and return only valid JSON.',
-          'First, transcribe the meeting audio as accurately as possible.',
-          'Then extract a structured analysis with this exact top-level shape:',
-          '{"bant":{"budget":"","authority":"","need":"","timeline":""},"vibe":{"score":0,"label":"","signals":[]},"dealArc":{"momentum":"Flat","resolvedObjections":[]},"sentiment":{"score":0,"label":"Neutral","trend":"Stable","stageSignals":[{"stage":"","score":0,"label":"Neutral"}]},"operational":{"interactionCount":1,"durationSeconds":0,"talkTimeSeconds":0,"holdTimeSeconds":0,"customerInitiated":true},"customerIntent":{"primary":"","confidence":0,"signals":[]},"objections":{"common":[],"unresolved":[],"frequency":0,"resolutionRate":0},"buyerEngagement":{"talkToListenRatio":"","buyerParticipationRate":0,"buyerQuestionCount":0,"interruptionPattern":""},"dealHealth":{"sentimentTrend":"Stable","momentumScore":0,"objectionFrequency":0,"objectionResolutionRate":0},"buyingSignals":{"budgetSignal":"","timelineSignal":"","authoritySignal":"","competitorMentions":[]},"repEffectiveness":{"discoveryDepthScore":0,"valueArticulationRate":0,"objectionHandlingQuality":"","nextStepClarityScore":0},"risk":{"riskyLanguage":[],"confusionPoints":[],"overpromiseFlags":[],"skepticismSignals":[],"ghostingRisk":"Medium"},"dimensions":{"product":"","geography":"","repTenure":""},"termMonitoring":{"trackedTerms":[{"term":"","mentions":0,"spike":false}]},"summary":"","transcript":""}',
-          'Rules:',
-          '- `vibe.score` must be an integer from 0 to 100.',
-          '- `vibe.label` must be one of Excited, Neutral, Skeptical.',
-          '- `dealArc.momentum` must be one of Increasing, Cooling, Flat.',
-          '- `sentiment.score`, `buyerParticipationRate`, `resolutionRate`, `momentumScore`, `discoveryDepthScore`, `valueArticulationRate`, and `nextStepClarityScore` must be integers from 0 to 100.',
-          '- `sentiment.label` and each stage signal label must be one of Positive, Neutral, Negative.',
-          '- `sentiment.trend` and `dealHealth.sentimentTrend` must be one of Improving, Declining, Stable.',
-          '- `risk.ghostingRisk` must be one of Low, Medium, High.',
-          '- `operational.interactionCount` should usually be 1 for a single uploaded meeting.',
-          '- If exact talk time or hold time cannot be determined from the audio/transcript, set them to 0.',
-          '- Infer customer intent using labels like Exploring, Evaluation, Buying, Renewal, Support, or Unknown.',
-          '- `dimensions.product`, `dimensions.geography`, and `dimensions.repTenure` should be concise and empty when unknown.',
-          '- `termMonitoring.trackedTerms` must only include configured tracked terms that are mentioned or show a likely spike relative to prior meetings.',
-          '- Keep `resolvedObjections` and `signals` concise.',
-          '- If a field is unknown, use an empty string or empty array.',
-          '- Summary should be 1 to 3 sentences and mention momentum relative to prior meetings when supported by context.',
-          trackedTermsPrompt,
-          `Prior meeting context:\n${historyContext}`
-        ].join('\n')
-      },
-      {
-        inlineData: {
-          mimeType,
-          data: audioBuffer.toString('base64')
-        }
-      }
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: `Analyze the following sales call transcript:\n\n${transcript}` }
     ],
-    config: {
-      responseMimeType: 'application/json',
-      temperature: 0.2
-    }
+    temperature: 0.2,
+    response_format: { type: 'json_object' },
   });
 
-  if (!response.text) {
-    throw new Error('Gemini returned an empty response');
+  const text = response.choices[0]?.message?.content;
+  if (!text) {
+    throw new Error('NVIDIA LLM returned an empty response');
   }
 
-  return normalizeAnalysis(JSON.parse(response.text));
+  const parsed = normalizeAnalysis(JSON.parse(text));
+  // Ensure transcript is preserved even if the LLM omitted it
+  if (!parsed.transcript) {
+    parsed.transcript = transcript;
+  }
+  return parsed;
 }
 
 export async function analyzeAudio(
@@ -570,17 +609,17 @@ export async function analyzeAudio(
   previousMeetingSummaries: MeetingSummary[],
   mimeType = 'audio/webm'
 ): Promise<AnalysisResult> {
-  const apiKey = getGeminiApiKey();
+  const apiKey = getNvidiaApiKey();
 
   if (!apiKey) {
-    return getFallbackAnalysis('Missing GEMINI_API_KEY');
+    return getFallbackAnalysis('Missing NVIDIA_API_KEY');
   }
 
   try {
-    return await analyzeWithGemini(audioBuffer, mimeType, previousMeetingSummaries);
+    return await analyzeWithNvidia(audioBuffer, mimeType, previousMeetingSummaries);
   } catch (error) {
-    console.error('Error analyzing audio with Gemini:', error);
-    return getFallbackAnalysis(error instanceof Error ? error.message : 'Unknown Gemini error');
+    console.error('Error analyzing audio with NVIDIA:', error);
+    return getFallbackAnalysis(error instanceof Error ? error.message : 'Unknown NVIDIA error');
   }
 }
 
@@ -687,57 +726,54 @@ export type ExplanationResponse = {
   actionableInsight?: string;
 };
 
-async function generateExplanationWithGemini(
+async function generateExplanationWithNvidiaLLM(
   kpiKey: string,
   kpiMeta: { name: string; description: string; businessContext: string },
   currentValue: string | number | undefined,
   meetingSummary: unknown,
   clientName?: string
 ): Promise<ExplanationResponse> {
-  const ai = getGeminiClient();
+  const client = getNvidiaLLMClient();
   const summaryContext = meetingSummary ? JSON.stringify(meetingSummary) : 'No meeting data available yet.';
   const clientContext = clientName ? `for client "${clientName}"` : '';
   const valueContext = currentValue !== undefined ? `Current value: ${currentValue}` : '';
 
-  const response = await ai.models.generateContent({
+  const prompt = [
+    'You are a sales intelligence assistant explaining KPIs to business users.',
+    'Generate a brief, actionable explanation for a dashboard metric.',
+    '',
+    `KPI: ${kpiMeta.name}`,
+    `Definition: ${kpiMeta.description}`,
+    `Business Context: ${kpiMeta.businessContext}`,
+    valueContext,
+    '',
+    `Meeting Analysis Data ${clientContext}:`,
+    summaryContext,
+    '',
+    'Return JSON with this exact shape:',
+    '{"explanation":"2-3 sentence explanation of what this metric shows and why it has this value based on the meeting data","actionableInsight":"1 sentence specific action the sales rep should take"}',
+    '',
+    'Rules:',
+    '- Write for non-technical business users',
+    '- Reference specific details from the meeting data when available',
+    '- Keep explanation under 50 words',
+    '- Make actionableInsight specific and practical',
+    '- If no meeting data, explain what the metric will show once data is available'
+  ].join('\n');
+
+  const response = await client.chat.completions.create({
     model: DEFAULT_MODEL,
-    contents: [
-      {
-        text: [
-          'You are a sales intelligence assistant explaining KPIs to business users.',
-          'Generate a brief, actionable explanation for a dashboard metric.',
-          '',
-          `KPI: ${kpiMeta.name}`,
-          `Definition: ${kpiMeta.description}`,
-          `Business Context: ${kpiMeta.businessContext}`,
-          valueContext,
-          '',
-          `Meeting Analysis Data ${clientContext}:`,
-          summaryContext,
-          '',
-          'Return JSON with this exact shape:',
-          '{"explanation":"2-3 sentence explanation of what this metric shows and why it has this value based on the meeting data","actionableInsight":"1 sentence specific action the sales rep should take"}',
-          '',
-          'Rules:',
-          '- Write for non-technical business users',
-          '- Reference specific details from the meeting data when available',
-          '- Keep explanation under 50 words',
-          '- Make actionableInsight specific and practical',
-          '- If no meeting data, explain what the metric will show once data is available'
-        ].join('\n')
-      }
-    ],
-    config: {
-      responseMimeType: 'application/json',
-      temperature: 0.3
-    }
+    messages: [{ role: 'user', content: prompt }],
+    temperature: 0.3,
+    response_format: { type: 'json_object' },
   });
 
-  if (!response.text) {
-    throw new Error('Gemini returned empty response for explanation');
+  const text = response.choices[0]?.message?.content;
+  if (!text) {
+    throw new Error('NVIDIA LLM returned empty response for explanation');
   }
 
-  const parsed = JSON.parse(response.text);
+  const parsed = JSON.parse(text);
   return {
     kpiKey,
     kpiName: kpiMeta.name,
@@ -747,7 +783,7 @@ async function generateExplanationWithGemini(
 }
 
 export async function explainKpi(request: ExplanationRequest): Promise<ExplanationResponse> {
-  const apiKey = getGeminiApiKey();
+  const apiKey = getNvidiaApiKey();
   const kpiMeta = KPI_EXPLANATIONS[request.kpiKey];
 
   if (!kpiMeta) {
@@ -767,7 +803,7 @@ export async function explainKpi(request: ExplanationRequest): Promise<Explanati
   }
 
   try {
-    return await generateExplanationWithGemini(
+    return await generateExplanationWithNvidiaLLM(
       request.kpiKey,
       kpiMeta,
       request.currentValue,
@@ -861,71 +897,68 @@ const KPI_EVIDENCE_CONFIG: Record<string, { name: string; focusAreas: string; ex
   }
 };
 
-async function extractKpiEvidenceWithGemini(
+async function extractKpiEvidenceWithNvidiaLLM(
   kpiKey: string,
   kpiConfig: { name: string; focusAreas: string; extractionPrompt: string },
   transcript: string,
   meetingSummary: unknown,
   kpiValue?: string | number
 ): Promise<KpiEvidenceResponse> {
-  const ai = getGeminiClient();
+  const client = getNvidiaLLMClient();
   const summaryContext = meetingSummary ? JSON.stringify(meetingSummary) : '{}';
 
-  const response = await ai.models.generateContent({
+  const prompt = [
+    `You are analyzing a sales conversation transcript to extract evidence for the "${kpiConfig.name}" metric.`,
+    '',
+    '## Task',
+    kpiConfig.extractionPrompt,
+    '',
+    '## Focus Areas',
+    kpiConfig.focusAreas,
+    '',
+    kpiValue !== undefined ? `## Current KPI Value: ${kpiValue}` : '',
+    '',
+    '## Meeting Analysis Context',
+    summaryContext,
+    '',
+    '## Transcript',
+    transcript,
+    '',
+    '## Output Format',
+    'Return valid JSON with this exact structure:',
+    '{',
+    '  "summary": "2-3 sentence summary explaining how the conversation contributed to this KPI score",',
+    '  "excerpts": [',
+    '    {',
+    '      "quote": "Exact quote from transcript (keep concise, 1-3 sentences max)",',
+    '      "speaker": "buyer" or "rep" or "unknown",',
+    '      "sentiment": "positive" or "neutral" or "negative",',
+    '      "relevance": "Brief explanation of why this quote matters for this KPI"',
+    '    }',
+    '  ]',
+    '}',
+    '',
+    'Rules:',
+    '- Extract 3-8 most relevant excerpts, prioritizing the most impactful quotes',
+    '- Use exact quotes from the transcript (minor cleanup for readability is OK)',
+    '- Keep each quote concise - focus on the key phrase or statement',
+    '- Identify speaker as buyer/rep based on context',
+    '- Summary should directly explain the KPI score'
+  ].join('\n');
+
+  const response = await client.chat.completions.create({
     model: DEFAULT_MODEL,
-    contents: [
-      {
-        text: [
-          `You are analyzing a sales conversation transcript to extract evidence for the "${kpiConfig.name}" metric.`,
-          '',
-          '## Task',
-          kpiConfig.extractionPrompt,
-          '',
-          '## Focus Areas',
-          kpiConfig.focusAreas,
-          '',
-          kpiValue !== undefined ? `## Current KPI Value: ${kpiValue}` : '',
-          '',
-          '## Meeting Analysis Context',
-          summaryContext,
-          '',
-          '## Transcript',
-          transcript,
-          '',
-          '## Output Format',
-          'Return valid JSON with this exact structure:',
-          '{',
-          '  "summary": "2-3 sentence summary explaining how the conversation contributed to this KPI score",',
-          '  "excerpts": [',
-          '    {',
-          '      "quote": "Exact quote from transcript (keep concise, 1-3 sentences max)",',
-          '      "speaker": "buyer" or "rep" or "unknown",',
-          '      "sentiment": "positive" or "neutral" or "negative",',
-          '      "relevance": "Brief explanation of why this quote matters for this KPI"',
-          '    }',
-          '  ]',
-          '}',
-          '',
-          'Rules:',
-          '- Extract 3-8 most relevant excerpts, prioritizing the most impactful quotes',
-          '- Use exact quotes from the transcript (minor cleanup for readability is OK)',
-          '- Keep each quote concise - focus on the key phrase or statement',
-          '- Identify speaker as buyer/rep based on context',
-          '- Summary should directly explain the KPI score'
-        ].join('\n')
-      }
-    ],
-    config: {
-      responseMimeType: 'application/json',
-      temperature: 0.3
-    }
+    messages: [{ role: 'user', content: prompt }],
+    temperature: 0.3,
+    response_format: { type: 'json_object' },
   });
 
-  if (!response.text) {
-    throw new Error('Gemini returned an empty response');
+  const text = response.choices[0]?.message?.content;
+  if (!text) {
+    throw new Error('NVIDIA LLM returned an empty response');
   }
 
-  const parsed = JSON.parse(response.text);
+  const parsed = JSON.parse(text);
   
   // Normalize and validate the response
   const excerpts: EvidenceExcerptResponse[] = Array.isArray(parsed.excerpts)
@@ -959,7 +992,7 @@ export type KpiEvidenceRequest = {
 };
 
 export async function extractKpiEvidence(request: KpiEvidenceRequest): Promise<KpiEvidenceResponse> {
-  const apiKey = getGeminiApiKey();
+  const apiKey = getNvidiaApiKey();
   const kpiConfig = KPI_EVIDENCE_CONFIG[request.kpiKey];
 
   // Fallback for unknown KPI
@@ -999,7 +1032,7 @@ export async function extractKpiEvidence(request: KpiEvidenceRequest): Promise<K
   }
 
   try {
-    return await extractKpiEvidenceWithGemini(
+    return await extractKpiEvidenceWithNvidiaLLM(
       request.kpiKey,
       kpiConfig,
       request.transcript,
