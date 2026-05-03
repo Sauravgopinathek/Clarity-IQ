@@ -29,6 +29,12 @@ export const requireAuth = async (req: Request, res: Response, next: NextFunctio
 
   const token = authHeader.split(' ')[1];
 
+  // Demo mode bypass
+  if (token === 'demo-token') {
+    req.user = { sub: 'demo-user-id', email: 'demo@clarityiq.ai' };
+    return next();
+  }
+
   try {
     // Let Supabase handle the exact algorithmic verification (ECC vs Shared Secret)
     const { data: { user }, error } = await supabase.auth.getUser(token);

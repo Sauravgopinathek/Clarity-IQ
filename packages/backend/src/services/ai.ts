@@ -1,13 +1,14 @@
 import OpenAI from 'openai';
 import FormData from 'form-data';
 import Groq from 'groq-sdk';
+import { transcribeWithDiarization, isDeepgramConfigured } from './diarization';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
-const DEFAULT_MODEL = process.env.NVIDIA_LLM_MODEL || 'meta/llama-3.1-70b-instruct';
-const NVIDIA_ASR_URL = process.env.NVIDIA_ASR_URL || 'https://ai.api.nvidia.com/v1/audio/transcriptions';
-const NVIDIA_LLM_BASE_URL = process.env.NVIDIA_LLM_BASE_URL || 'https://integrate.api.nvidia.com/v1';
+const DEFAULT_MODEL = process.env.GROQ_LLM_MODEL || 'llama-3.3-70b-versatile';
+const ASR_MODEL = process.env.GROQ_ASR_MODEL || 'whisper-large-v3';
+const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 
 type MeetingSummary = {
   summaryJson: unknown;
@@ -130,14 +131,13 @@ type AnalysisResult = {
   error?: string;
 };
 
-function getNvidiaApiKey(): string {
-  return process.env.NVIDIA_API_KEY || '';
+function getGroqApiKey(): string {
+  return process.env.GROQ_API_KEY || '';
 }
 
-function getNvidiaLLMClient(): OpenAI {
-  return new OpenAI({
-    apiKey: getNvidiaApiKey(),
-    baseURL: NVIDIA_LLM_BASE_URL,
+function getGroqClient(): Groq {
+  return new Groq({
+    apiKey: getGroqApiKey(),
   });
 }
 
@@ -154,7 +154,7 @@ async function transcribeAudioWithGroq(audioBuffer: Buffer, mimeType: string): P
   try {
     const transcription = await groq.audio.transcriptions.create({
       file: fs.createReadStream(tempPath),
-      model: 'whisper-large-v3',
+      model: ASR_MODEL,
       language: 'en',
       response_format: 'text'
     });
@@ -536,30 +536,61 @@ function buildHistoryPrompt(previousMeetingSummaries: MeetingSummary[]): string 
     .join('\n');
 }
 
-async function analyzeWithNvidia(
+async function analyzeWithGroq(
   audioBuffer: Buffer,
   mimeType: string,
   previousMeetingSummaries: MeetingSummary[]
 ): Promise<AnalysisResult> {
-  // Phase 1: Speech-to-Text via Groq Whisper API
-  const transcript = await transcribeAudioWithGroq(audioBuffer, mimeType);
+  let transcript: string;
+  let diarizationData: Awaited<ReturnType<typeof transcribeWithDiarization>> | null = null;
 
-  if (!transcript.trim()) {
-    return getFallbackAnalysis('Groq Whisper returned an empty transcript');
+  // Phase 1: Transcription — prefer Deepgram (diarized) over Groq Whisper (flat text)
+  if (isDeepgramConfigured()) {
+    try {
+      console.log('[AI] Using Deepgram diarization for transcription...');
+      diarizationData = await transcribeWithDiarization(audioBuffer, mimeType);
+      transcript = diarizationData.labeledTranscript;
+      console.log(
+        `[AI] Deepgram: ${diarizationData.interactionCount} turns, ratio ${diarizationData.talkToListenRatio}`
+      );
+    } catch (diarErr) {
+      console.warn('[AI] Deepgram failed, falling back to Groq Whisper:', diarErr);
+      transcript = await transcribeAudioWithGroq(audioBuffer, mimeType);
+    }
+  } else {
+    transcript = await transcribeAudioWithGroq(audioBuffer, mimeType);
   }
 
-  // Phase 2: Analyze transcript via NVIDIA NIM LLM
-  const client = getNvidiaLLMClient();
+  if (!transcript.trim()) {
+    return getFallbackAnalysis('Transcription returned an empty result');
+  }
+
+  // Phase 2: Analyze transcript via Groq LLM
+  const client = getGroqClient();
   const historyContext = buildHistoryPrompt(previousMeetingSummaries);
   const trackedTerms = getTrackedTerms();
   const trackedTermsPrompt = trackedTerms.length
     ? `Tracked terms to monitor for spikes: ${trackedTerms.join(', ')}`
     : 'Tracked terms to monitor for spikes: none configured.';
 
+  // If Deepgram provided exact metrics, tell the LLM to use them directly
+  const diarizationContext = diarizationData
+    ? [
+        'IMPORTANT — The following fields have already been precisely measured and must be used EXACTLY as provided in your JSON output. Do NOT override them:',
+        `  - operational.interactionCount = ${diarizationData.interactionCount}`,
+        `  - operational.durationSeconds = ${diarizationData.durationSeconds}`,
+        `  - operational.talkTimeSeconds = ${diarizationData.repTalkSeconds}`,
+        `  - buyerEngagement.talkToListenRatio = "${diarizationData.talkToListenRatio}"`,
+        `  - buyerEngagement.buyerParticipationRate = ${diarizationData.buyerParticipationRate}`,
+        'The transcript below uses [Rep]: and [Buyer]: labels for each speaker turn.',
+      ].join('\n')
+    : '';
+
   const systemPrompt = [
     'You analyze sales call transcripts and return only valid JSON.',
     'Extract a structured analysis with this exact top-level shape:',
     '{"bant":{"budget":"","authority":"","need":"","timeline":""},"vibe":{"score":0,"label":"","signals":[]},"dealArc":{"momentum":"Flat","resolvedObjections":[]},"sentiment":{"score":0,"label":"Neutral","trend":"Stable","stageSignals":[{"stage":"","score":0,"label":"Neutral"}]},"operational":{"interactionCount":1,"durationSeconds":0,"talkTimeSeconds":0,"holdTimeSeconds":0,"customerInitiated":true},"customerIntent":{"primary":"","confidence":0,"signals":[]},"objections":{"common":[],"unresolved":[],"frequency":0,"resolutionRate":0},"buyerEngagement":{"talkToListenRatio":"","buyerParticipationRate":0,"buyerQuestionCount":0,"interruptionPattern":""},"dealHealth":{"sentimentTrend":"Stable","momentumScore":0,"objectionFrequency":0,"objectionResolutionRate":0},"buyingSignals":{"budgetSignal":"","timelineSignal":"","authoritySignal":"","competitorMentions":[]},"repEffectiveness":{"discoveryDepthScore":0,"valueArticulationRate":0,"objectionHandlingQuality":"","nextStepClarityScore":0},"risk":{"riskyLanguage":[],"confusionPoints":[],"overpromiseFlags":[],"skepticismSignals":[],"ghostingRisk":"Medium"},"dimensions":{"product":"","geography":"","repTenure":""},"termMonitoring":{"trackedTerms":[{"term":"","mentions":0,"spike":false}]},"summary":"","transcript":""}',
+    diarizationContext,
     'Rules:',
     '- `vibe.score` must be an integer from 0 to 100.',
     '- `vibe.label` must be one of Excited, Neutral, Skeptical.',
@@ -567,10 +598,24 @@ async function analyzeWithNvidia(
     '- `sentiment.score`, `buyerParticipationRate`, `resolutionRate`, `momentumScore`, `discoveryDepthScore`, `valueArticulationRate`, and `nextStepClarityScore` must be integers from 0 to 100.',
     '- `sentiment.label` and each stage signal label must be one of Positive, Neutral, Negative.',
     '- `sentiment.trend` and `dealHealth.sentimentTrend` must be one of Improving, Declining, Stable.',
-    '- `risk.ghostingRisk` must be one of Low, Medium, High.',
-    '- `operational.interactionCount` should usually be 1 for a single uploaded meeting.',
-    '- If exact talk time or hold time cannot be determined, set them to 0.',
-    '- Infer customer intent using labels like Exploring, Evaluation, Buying, Renewal, Support, or Unknown.',
+    '- `risk.ghostingRisk` must be one of Low, Medium, High. Use these criteria:',
+    '  * High: vague/non-committal endings ("send me details", "will get back"), no concrete next step, low buyer question count, flat or declining sentiment, multiple unresolved objections.',
+    '  * Low: buyer proposes next meeting, asks detailed questions, mentions internal stakeholders, shows timeline urgency.',
+    '  * Medium: anything in between.',
+    '- ANALYTICAL RIGOR: You MUST differentiate scores. Do NOT default all numeric scores to the same value (like 80). If a rep has great discovery but poor next-step clarity, the scores MUST reflect that discrepancy.',
+    '- RESOLUTION RATE: `objections.resolutionRate` must be calculated as `(resolved / total) * 100`. If zero objections were raised, return 100.',
+    '- SCORING CRITERIA: `discoveryDepthScore` (Did they find pain?), `valueArticulationRate` (Did they link features to business value?), `nextStepClarityScore` (Is there a concrete date/owner?).',
+    '- SPEAKER INFERENCE: If the transcript lacks [Rep]/[Buyer] labels, infer speakers. The "Rep" drives the agenda and presents value. The "Buyer" shares pain points and questions pricing/timeline.',
+    '- `operational.interactionCount`: Count the total number of back-and-forth exchanges (turns) in this transcript if not already provided above.',
+    '- `buyerEngagement.talkToListenRatio`: Estimate the ratio of Rep-words to Buyer-words (e.g., "40:60") if not already provided above. Do NOT return "0:0".',
+    '- CUSTOMER INTENT: Classify `customerIntent.primary` using these labels ONLY:',
+    '  * "Exploring" - general curiosity, no urgency, vague questions.',
+    '  * "Evaluation" - comparing options, asking about features/integrations/pricing, requesting demos.',
+    '  * "Buying" - mentions budget approval, contract, timeline, or asking about onboarding.',
+    '  * "Renewal" - existing customer discussing extension or upgrade.',
+    '  * "Support" - raising issues, complaints, or seeking help with existing product.',
+    '  * "Unknown" - intent cannot be determined from transcript.',
+    '- Set `customerIntent.confidence` as an integer 0-100 reflecting how clearly the transcript signals this intent.',
     '- `dimensions.product`, `dimensions.geography`, and `dimensions.repTenure` should be concise and empty when unknown.',
     '- `termMonitoring.trackedTerms` must only include configured tracked terms that are mentioned or show a likely spike relative to prior meetings.',
     '- Keep `resolvedObjections` and `signals` concise.',
@@ -593,14 +638,35 @@ async function analyzeWithNvidia(
 
   const text = response.choices[0]?.message?.content;
   if (!text) {
-    throw new Error('NVIDIA LLM returned an empty response');
+    throw new Error('Groq LLM returned an empty response');
   }
 
   const parsed = normalizeAnalysis(JSON.parse(text));
-  // Ensure transcript is preserved even if the LLM omitted it
-  if (!parsed.transcript) {
-    parsed.transcript = transcript;
+
+  // Override AI-estimated fields with Deepgram-measured values for 100% accuracy
+  if (diarizationData) {
+    parsed.operational = {
+      holdTimeSeconds: 0,
+      customerInitiated: true,
+      ...parsed.operational,
+      interactionCount: diarizationData.interactionCount,
+      durationSeconds: diarizationData.durationSeconds,
+      talkTimeSeconds: diarizationData.repTalkSeconds,
+    };
+    parsed.buyerEngagement = {
+      buyerQuestionCount: 0,
+      interruptionPattern: 'None',
+      ...parsed.buyerEngagement,
+      talkToListenRatio: diarizationData.talkToListenRatio,
+      buyerParticipationRate: diarizationData.buyerParticipationRate,
+    };
   }
+
+  // Ensure transcript is preserved (use labeled version for better UI display)
+  if (!parsed.transcript) {
+    parsed.transcript = diarizationData?.labeledTranscript ?? transcript;
+  }
+
   return parsed;
 }
 
@@ -609,17 +675,17 @@ export async function analyzeAudio(
   previousMeetingSummaries: MeetingSummary[],
   mimeType = 'audio/webm'
 ): Promise<AnalysisResult> {
-  const apiKey = getNvidiaApiKey();
+  const apiKey = getGroqApiKey();
 
   if (!apiKey) {
-    return getFallbackAnalysis('Missing NVIDIA_API_KEY');
+    return getFallbackAnalysis('Missing GROQ_API_KEY');
   }
 
   try {
-    return await analyzeWithNvidia(audioBuffer, mimeType, previousMeetingSummaries);
+    return await analyzeWithGroq(audioBuffer, mimeType, previousMeetingSummaries);
   } catch (error) {
-    console.error('Error analyzing audio with NVIDIA:', error);
-    return getFallbackAnalysis(error instanceof Error ? error.message : 'Unknown NVIDIA error');
+    console.error('Error analyzing audio with Groq:', error);
+    return getFallbackAnalysis(error instanceof Error ? error.message : 'Unknown Groq error');
   }
 }
 
@@ -726,14 +792,14 @@ export type ExplanationResponse = {
   actionableInsight?: string;
 };
 
-async function generateExplanationWithNvidiaLLM(
+async function generateExplanationWithGroqLLM(
   kpiKey: string,
   kpiMeta: { name: string; description: string; businessContext: string },
   currentValue: string | number | undefined,
   meetingSummary: unknown,
   clientName?: string
 ): Promise<ExplanationResponse> {
-  const client = getNvidiaLLMClient();
+  const client = getGroqClient();
   const summaryContext = meetingSummary ? JSON.stringify(meetingSummary) : 'No meeting data available yet.';
   const clientContext = clientName ? `for client "${clientName}"` : '';
   const valueContext = currentValue !== undefined ? `Current value: ${currentValue}` : '';
@@ -770,7 +836,7 @@ async function generateExplanationWithNvidiaLLM(
 
   const text = response.choices[0]?.message?.content;
   if (!text) {
-    throw new Error('NVIDIA LLM returned empty response for explanation');
+    throw new Error('Groq LLM returned empty response for explanation');
   }
 
   const parsed = JSON.parse(text);
@@ -783,7 +849,7 @@ async function generateExplanationWithNvidiaLLM(
 }
 
 export async function explainKpi(request: ExplanationRequest): Promise<ExplanationResponse> {
-  const apiKey = getNvidiaApiKey();
+  const apiKey = getGroqApiKey();
   const kpiMeta = KPI_EXPLANATIONS[request.kpiKey];
 
   if (!kpiMeta) {
@@ -803,7 +869,7 @@ export async function explainKpi(request: ExplanationRequest): Promise<Explanati
   }
 
   try {
-    return await generateExplanationWithNvidiaLLM(
+    return await generateExplanationWithGroqLLM(
       request.kpiKey,
       kpiMeta,
       request.currentValue,
@@ -897,14 +963,14 @@ const KPI_EVIDENCE_CONFIG: Record<string, { name: string; focusAreas: string; ex
   }
 };
 
-async function extractKpiEvidenceWithNvidiaLLM(
+async function extractKpiEvidenceWithGroqLLM(
   kpiKey: string,
   kpiConfig: { name: string; focusAreas: string; extractionPrompt: string },
   transcript: string,
   meetingSummary: unknown,
   kpiValue?: string | number
 ): Promise<KpiEvidenceResponse> {
-  const client = getNvidiaLLMClient();
+  const client = getGroqClient();
   const summaryContext = meetingSummary ? JSON.stringify(meetingSummary) : '{}';
 
   const prompt = [
@@ -955,7 +1021,7 @@ async function extractKpiEvidenceWithNvidiaLLM(
 
   const text = response.choices[0]?.message?.content;
   if (!text) {
-    throw new Error('NVIDIA LLM returned an empty response');
+    throw new Error('Groq LLM returned an empty response');
   }
 
   const parsed = JSON.parse(text);
@@ -992,7 +1058,7 @@ export type KpiEvidenceRequest = {
 };
 
 export async function extractKpiEvidence(request: KpiEvidenceRequest): Promise<KpiEvidenceResponse> {
-  const apiKey = getNvidiaApiKey();
+  const apiKey = getGroqApiKey();
   const kpiConfig = KPI_EVIDENCE_CONFIG[request.kpiKey];
 
   // Fallback for unknown KPI
@@ -1032,7 +1098,7 @@ export async function extractKpiEvidence(request: KpiEvidenceRequest): Promise<K
   }
 
   try {
-    return await extractKpiEvidenceWithNvidiaLLM(
+    return await extractKpiEvidenceWithGroqLLM(
       request.kpiKey,
       kpiConfig,
       request.transcript,

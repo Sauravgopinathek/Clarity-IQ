@@ -50,7 +50,7 @@ async function main() {
     
     console.log(`Sample audio downloaded: ${audioBuffer.length} bytes.`);
     
-    console.log('\n3. Calling NVIDIA AI Services (ASR + LLM)...');
+    console.log('\n3. Calling Groq AI Services (Whisper ASR + LLM)...');
     console.log('This may take a few seconds...');
     
     // Call the AI service with the audio buffer and empty prior meetings

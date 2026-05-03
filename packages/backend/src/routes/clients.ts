@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { prisma } from '../index';
 import { requireAuth } from '../middleware/auth';
+import { seedDemoData } from '../utils/demo_seeder';
 
 const router = Router();
 
@@ -13,6 +14,11 @@ router.get('/', async (req, res) => {
     }
 
     const userId = req.user.sub;
+
+    // Automatically seed demo data if this is the demo user
+    if (userId === 'demo-user-id') {
+      await seedDemoData(prisma, userId);
+    }
     const clients = await prisma.client.findMany({
       where: { userId }
     });

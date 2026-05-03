@@ -12,20 +12,51 @@ export const supabase = createClient(supabaseUrl, supabaseKey);
 
 function App() {
   const [session, setSession] = useState<Session | null>(null);
+  const [isDemo, setIsDemo] = useState(false);
 
   React.useEffect(() => {
+    // Listen for Demo login event
+    const handleDemo = () => {
+      const mockSession: any = {
+        access_token: 'demo-token',
+        token_type: 'bearer',
+        expires_in: 3600,
+        refresh_token: 'demo-refresh',
+        user: {
+          id: 'demo-user-id',
+          email: 'demo@clarityiq.ai',
+          app_metadata: {},
+          user_metadata: { full_name: 'Demo User' },
+          aud: 'authenticated',
+          created_at: new Date().toISOString(),
+        }
+      };
+      setSession(mockSession);
+      setIsDemo(true);
+    };
+
+    const handleDemoLogout = () => {
+      setIsDemo(false);
+      setSession(null);
+    };
+
+    window.addEventListener('login-demo', handleDemo);
+    window.addEventListener('logout-demo', handleDemoLogout);
+
     supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
+      if (!isDemo) setSession(session);
     });
 
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
+      if (!isDemo) setSession(session);
     });
 
     return () => {
+      window.removeEventListener('login-demo', handleDemo);
+      window.removeEventListener('logout-demo', handleDemoLogout);
       listener.subscription.unsubscribe();
     };
-  }, []);
+  }, [isDemo]);
 
   return (
     <HashRouter>

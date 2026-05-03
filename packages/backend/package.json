@@ -10,6 +10,7 @@
     "postinstall": "prisma generate"
   },
   "dependencies": {
+    "@deepgram/sdk": "^5.1.0",
     "@prisma/adapter-pg": "^5.20.0",
     "@prisma/client": "^5.22.0",
     "@supabase/supabase-js": "^2.45.0",

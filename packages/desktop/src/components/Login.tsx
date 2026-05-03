@@ -117,6 +117,24 @@ export default function Login({ supabase }: LoginProps) {
             {loading ? <Loader2 className="spinner" size={18} /> : (isLogin ? 'Sign In to Dashboard' : 'Create Account')}
             {!loading && <ArrowRight size={18} />}
           </button>
+
+          <div style={{ position: 'relative', margin: '1rem 0', textAlign: 'center' }}>
+            <div style={{ position: 'absolute', top: '50%', left: 0, right: 0, height: '1px', background: 'rgba(255,255,255,0.1)', zIndex: 1 }} />
+            <span style={{ position: 'relative', zIndex: 2, background: '#1e203c', padding: '0 1rem', color: '#64748b', fontSize: '0.85rem' }}>OR</span>
+          </div>
+
+          <button 
+            type="button"
+            onClick={() => {
+              // We'll handle this in App.tsx by passing a custom event or using a shared state
+              window.dispatchEvent(new CustomEvent('login-demo'));
+            }}
+            style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', width: '100%', padding: '1rem', background: 'rgba(255,255,255,0.05)', color: 'white', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '12px', fontSize: '1rem', fontWeight: 600, cursor: 'pointer', transition: 'all 0.2s' }}
+            onMouseOver={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.1)'}
+            onMouseOut={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+          >
+            Explore with Demo Mode
+          </button>
         </form>
       </div>
 

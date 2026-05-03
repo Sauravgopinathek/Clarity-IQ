@@ -1,17 +1,16 @@
 import * as dotenv from 'dotenv';
 import * as path from 'path';
-import OpenAI from 'openai';
+import Groq from 'groq-sdk';
 
 dotenv.config({ path: path.join(__dirname, '../.env') });
 
-const apiKey = process.env.NVIDIA_API_KEY || '';
-const baseURL = process.env.NVIDIA_LLM_BASE_URL || 'https://integrate.api.nvidia.com/v1';
+const apiKey = process.env.GROQ_API_KEY || '';
 
 async function main() {
-  const client = new OpenAI({ apiKey, baseURL });
+  const client = new Groq({ apiKey });
   try {
     const models = await client.models.list();
-    console.log('Available models:', models.data.map(m => m.id));
+    console.log('Available Groq models:', models.data.map(m => m.id));
   } catch (err) {
     console.error('Error fetching models:', err);
   }

@@ -559,7 +559,13 @@ export default function Dashboard({ session }: { session: any }) {
 
         <div style={{ padding: '1.5rem', borderTop: `1px solid ${colors.border}` }}>
           <button 
-            onClick={() => supabase.auth.signOut()} 
+            onClick={async () => {
+              if (session.user?.id === 'demo-user-id') {
+                window.dispatchEvent(new CustomEvent('logout-demo'));
+              } else {
+                await supabase.auth.signOut();
+              }
+            }}
             style={{ ...baseStyles.buttonGhost, width: '100%', justifyContent: 'flex-start', gap: '0.75rem', color: colors.textMuted }}
           >
             <LogOut size={18} /> Sign Out
