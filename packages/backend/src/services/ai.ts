@@ -7,7 +7,7 @@ import * as path from 'path';
 import * as os from 'os';
 
 const DEFAULT_MODEL = process.env.GROQ_LLM_MODEL || 'llama-3.3-70b-versatile';
-const ASR_MODEL = process.env.GROQ_ASR_MODEL || 'whisper-large-v3';
+const ASR_MODEL = process.env.GROQ_ASR_MODEL || 'whisper-large-v3-turbo';
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 
 type MeetingSummary = {

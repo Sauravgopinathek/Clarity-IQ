@@ -37,7 +37,7 @@ router.post('/', async (req, res) => {
 
     const userId = req.user.sub;
     const { name, domain } = req.body;
-    
+
     if (!name) return res.status(400).json({ error: 'Name is required' });
 
     // Ensure the User record exists in our DB, Supabase creates it in auth.users, but we need it in our User table

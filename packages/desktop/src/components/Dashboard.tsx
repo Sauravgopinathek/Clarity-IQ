@@ -1,5 +1,5 @@
 
-import React, { useEffect, useMemo, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -24,6 +24,7 @@ import {
   Users,
   Zap,
   Loader2,
+  Upload,
 } from 'lucide-react';
 import { AudioEngine } from '../audio/AudioEngine';
 import { supabase } from '../App';
@@ -182,6 +183,7 @@ export default function Dashboard({ session }: { session: any }) {
   const [recordingStartedAt, setRecordingStartedAt] = useState<number | null>(null);
   const [audioEngine] = useState(() => new AudioEngine());
   const [backendUrl] = useState(import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001');
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Explanation modal state
   const [explanationModalOpen, setExplanationModalOpen] = useState(false);
@@ -422,6 +424,37 @@ export default function Dashboard({ session }: { session: any }) {
     audioEngine.stopRecording();
   };
 
+  const handleUploadAudio = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !selectedClient) return;
+
+    setIsProcessing(true);
+    const formData = new FormData();
+    formData.append('audio', file, file.name);
+    formData.append('clientId', selectedClient);
+    formData.append('durationMs', '0');
+
+    try {
+      const res = await fetch(`${backendUrl}/meetings`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${session.access_token}` },
+        body: formData,
+      });
+      if (res.ok) {
+        await fetchMeetings(selectedClient);
+      } else {
+        alert('Failed to process uploaded audio');
+      }
+    } catch (err) {
+      console.error('Upload failed', err);
+      alert('Upload failed');
+    } finally {
+      setIsProcessing(false);
+      // Reset the file input so the same file can be re-uploaded
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
   const currentMeeting = meetings[0];
   const summary = currentMeeting?.summaryJson as MeetingSummary | undefined;
   const analyzedMeetings = useMemo(() => meetings.filter((meeting) => meeting.summaryJson && Object.keys(meeting.summaryJson).length > 0), [meetings]);
@@ -593,9 +626,25 @@ export default function Dashboard({ session }: { session: any }) {
                   Analyzing with AI...
                 </div>
               ) : (
-                <button onClick={startMeeting} style={baseStyles.buttonSuccess}>
-                  <Mic size={18} /> Start Meeting
-                </button>
+                <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+                  <button onClick={startMeeting} style={baseStyles.buttonSuccess}>
+                    <Mic size={18} /> Start Meeting
+                  </button>
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    style={baseStyles.buttonPrimary}
+                    title="Upload an audio file for AI analysis"
+                  >
+                    <Upload size={18} /> Upload Audio
+                  </button>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="audio/*"
+                    style={{ display: 'none' }}
+                    onChange={handleUploadAudio}
+                  />
+                </div>
               )}
             </div>
 
