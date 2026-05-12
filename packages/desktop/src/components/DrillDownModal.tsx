@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { X, Loader2, MessageSquare, User, Headphones, ChevronDown, ChevronUp, Quote, Sparkles } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { X, Loader2, MessageSquare, User, Headphones, ChevronDown, ChevronUp, Quote, Sparkles, Link2 } from 'lucide-react';
 
 export type EvidenceExcerpt = {
   quote: string;
@@ -7,6 +7,13 @@ export type EvidenceExcerpt = {
   sentiment: 'positive' | 'neutral' | 'negative';
   relevance: string;
   timestamp?: string;
+  confidence?: 'high' | 'medium' | 'low';
+  source?: {
+    type: 'transcript';
+    label: string;
+    turnIndex?: number;
+    timestamp?: string;
+  };
 };
 
 export type DrillDownData = {
@@ -14,6 +21,8 @@ export type DrillDownData = {
   kpiName: string;
   kpiValue?: string | number;
   summary: string;
+  confidence?: 'high' | 'medium' | 'low';
+  confidenceReason?: string;
   excerpts: EvidenceExcerpt[];
   transcript: string;
   meetingId?: string;
@@ -125,8 +134,20 @@ function getSpeakerLabel(speaker: string) {
   return 'Unknown';
 }
 
-function ExcerptCard({ excerpt }: { excerpt: EvidenceExcerpt }) {
+function getConfidenceStyles(confidence?: string) {
+  switch (confidence) {
+    case 'high':
+      return { bg: colors.successBg, color: colors.success, label: 'High confidence' };
+    case 'low':
+      return { bg: colors.warningBg, color: colors.warning, label: 'Low confidence' };
+    default:
+      return { bg: colors.infoBg, color: colors.info, label: 'Medium confidence' };
+  }
+}
+
+function ExcerptCard({ excerpt, index, onSourceClick }: { excerpt: EvidenceExcerpt; index: number; onSourceClick: (index: number) => void }) {
   const sentimentStyles = getSentimentStyles(excerpt.sentiment);
+  const confidenceStyles = getConfidenceStyles(excerpt.confidence);
   
   return (
     <div style={{
@@ -194,14 +215,40 @@ function ExcerptCard({ excerpt }: { excerpt: EvidenceExcerpt }) {
         </span>
         
         {/* Timestamp if available */}
-        {excerpt.timestamp && (
-          <span style={{
-            color: colors.textMuted,
+        <span style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          padding: '0.25rem 0.6rem',
+          borderRadius: '999px',
+          backgroundColor: confidenceStyles.bg,
+          color: confidenceStyles.color,
+          fontSize: '0.75rem',
+          fontWeight: 600,
+        }}>
+          {confidenceStyles.label}
+        </span>
+
+        <button
+          type="button"
+          onClick={() => onSourceClick(index)}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '0.35rem',
+            padding: '0.25rem 0.6rem',
+            borderRadius: '999px',
+            border: `1px solid ${colors.border}`,
+            backgroundColor: 'rgba(255, 255, 255, 0.03)',
+            color: colors.textSecondary,
             fontSize: '0.75rem',
-          }}>
-            {excerpt.timestamp}
-          </span>
-        )}
+            fontWeight: 600,
+            cursor: 'pointer',
+          }}
+        >
+          <Link2 size={13} />
+          {excerpt.source?.label || 'Transcript excerpt'}
+          {excerpt.timestamp ? ` · ${excerpt.timestamp}` : ''}
+        </button>
       </div>
       
       {/* Relevance explanation */}
@@ -221,23 +268,35 @@ function ExcerptCard({ excerpt }: { excerpt: EvidenceExcerpt }) {
   );
 }
 
-function TranscriptViewer({ transcript, excerpts }: { transcript: string; excerpts: EvidenceExcerpt[] }) {
+function TranscriptViewer({ transcript, excerpts, selectedSourceIndex }: { transcript: string; excerpts: EvidenceExcerpt[]; selectedSourceIndex: number | null }) {
   const [isExpanded, setIsExpanded] = useState(false);
+
+  useEffect(() => {
+    if (selectedSourceIndex === null) return;
+    setIsExpanded(true);
+    window.setTimeout(() => {
+      document.getElementById(`evidence-source-${selectedSourceIndex}`)?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+      });
+    }, 50);
+  }, [selectedSourceIndex]);
   
   // Simple highlighting - find and highlight excerpt quotes in transcript
   const highlightedTranscript = React.useMemo(() => {
     if (!transcript) return '';
     
     let result = transcript;
-    excerpts.forEach((excerpt) => {
+    excerpts.forEach((excerpt, index) => {
       const escapedQuote = excerpt.quote.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const regex = new RegExp(`(${escapedQuote})`, 'gi');
       const sentimentColor = getSentimentStyles(excerpt.sentiment).color;
-      result = result.replace(regex, `<mark style="background: ${sentimentColor}20; color: ${sentimentColor}; padding: 2px 4px; border-radius: 4px;">$1</mark>`);
+      const outline = selectedSourceIndex === index ? ` outline: 1px solid ${sentimentColor};` : '';
+      result = result.replace(regex, `<mark id="evidence-source-${index}" style="background: ${sentimentColor}20; color: ${sentimentColor}; padding: 2px 4px; border-radius: 4px;${outline}">$1</mark>`);
     });
     
     return result;
-  }, [transcript, excerpts]);
+  }, [transcript, excerpts, selectedSourceIndex]);
   
   const previewLength = 500;
   const needsExpand = transcript.length > previewLength;
@@ -304,6 +363,8 @@ function TranscriptViewer({ transcript, excerpts }: { transcript: string; excerp
 }
 
 export default function DrillDownModal({ isOpen, onClose, data, isLoading }: DrillDownModalProps) {
+  const [selectedSourceIndex, setSelectedSourceIndex] = useState<number | null>(null);
+
   if (!isOpen) return null;
 
   const handleOverlayClick = (e: React.MouseEvent) => {
@@ -425,6 +486,36 @@ export default function DrillDownModal({ isOpen, onClose, data, isLoading }: Dri
                   {data.summary}
                 </p>
               </div>
+
+              {/* Confidence */}
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.75rem',
+                flexWrap: 'wrap',
+                margin: '-0.5rem 0 1.25rem 0',
+              }}>
+                <span style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  padding: '0.35rem 0.75rem',
+                  borderRadius: '999px',
+                  backgroundColor: getConfidenceStyles(data.confidence).bg,
+                  color: getConfidenceStyles(data.confidence).color,
+                  fontSize: '0.8rem',
+                  fontWeight: 700,
+                }}>
+                  {getConfidenceStyles(data.confidence).label}
+                </span>
+                {data.confidenceReason && (
+                  <span style={{
+                    color: colors.textMuted,
+                    fontSize: '0.85rem',
+                  }}>
+                    {data.confidenceReason}
+                  </span>
+                )}
+              </div>
               
               {/* Meeting date if available */}
               {data.meetingDate && (
@@ -454,7 +545,7 @@ export default function DrillDownModal({ isOpen, onClose, data, isLoading }: Dri
                   </h3>
                   
                   {data.excerpts.map((excerpt, index) => (
-                    <ExcerptCard key={index} excerpt={excerpt} />
+                    <ExcerptCard key={index} excerpt={excerpt} index={index} onSourceClick={setSelectedSourceIndex} />
                   ))}
                 </>
               ) : (
@@ -470,7 +561,7 @@ export default function DrillDownModal({ isOpen, onClose, data, isLoading }: Dri
               
               {/* Full transcript viewer */}
               {data.transcript && (
-                <TranscriptViewer transcript={data.transcript} excerpts={data.excerpts} />
+                <TranscriptViewer transcript={data.transcript} excerpts={data.excerpts} selectedSourceIndex={selectedSourceIndex} />
               )}
             </>
           ) : (

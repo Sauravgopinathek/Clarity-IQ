@@ -77,8 +77,9 @@ export async function seedDemoData(prisma: PrismaClient, userId: string) {
 
   await prisma.meeting.create({
     data: {
-      title: 'Sample Strategy Session',
+      audioUrl: 'https://example.com/demo-audio.webm',
       clientId: client.id,
+      userId: userId,
       summaryJson: sampleSummary,
       createdAt: new Date()
     }

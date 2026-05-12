@@ -22,6 +22,15 @@ type EvidenceExcerpt = {
   sentiment: 'positive' | 'neutral' | 'negative';
   relevance: string;       // Why this quote matters for the KPI
   timestamp?: string;      // Approximate position in conversation
+  confidence?: 'high' | 'medium' | 'low';
+  source?: EvidenceSource;
+};
+
+type EvidenceSource = {
+  type: 'transcript';
+  label: string;
+  turnIndex?: number;
+  timestamp?: string;
 };
 
 // Evidence map for all KPIs
@@ -541,8 +550,10 @@ async function analyzeWithGroq(
   mimeType: string,
   previousMeetingSummaries: MeetingSummary[]
 ): Promise<AnalysisResult> {
+  const startTime = Date.now();
   let transcript: string;
   let diarizationData: Awaited<ReturnType<typeof transcribeWithDiarization>> | null = null;
+  let usedDiarization = false;
 
   // Phase 1: Transcription — prefer Deepgram (diarized) over Groq Whisper (flat text)
   if (isDeepgramConfigured()) {
@@ -550,6 +561,7 @@ async function analyzeWithGroq(
       console.log('[AI] Using Deepgram diarization for transcription...');
       diarizationData = await transcribeWithDiarization(audioBuffer, mimeType);
       transcript = diarizationData.labeledTranscript;
+      usedDiarization = true;
       console.log(
         `[AI] Deepgram: ${diarizationData.interactionCount} turns, ratio ${diarizationData.talkToListenRatio}`
       );
@@ -602,6 +614,7 @@ async function analyzeWithGroq(
     '  * High: vague/non-committal endings ("send me details", "will get back"), no concrete next step, low buyer question count, flat or declining sentiment, multiple unresolved objections.',
     '  * Low: buyer proposes next meeting, asks detailed questions, mentions internal stakeholders, shows timeline urgency.',
     '  * Medium: anything in between.',
+    '',
     '- ANALYTICAL RIGOR: You MUST differentiate scores. Do NOT default all numeric scores to the same value (like 80). If a rep has great discovery but poor next-step clarity, the scores MUST reflect that discrepancy.',
     '- RESOLUTION RATE: `objections.resolutionRate` must be calculated as `(resolved / total) * 100`. If zero objections were raised, return 100.',
     '- SCORING CRITERIA: `discoveryDepthScore` (Did they find pain?), `valueArticulationRate` (Did they link features to business value?), `nextStepClarityScore` (Is there a concrete date/owner?).',
@@ -620,6 +633,8 @@ async function analyzeWithGroq(
     '- `termMonitoring.trackedTerms` must only include configured tracked terms that are mentioned or show a likely spike relative to prior meetings.',
     '- Keep `resolvedObjections` and `signals` concise.',
     '- If a field is unknown, use an empty string or empty array.',
+    '- Only use evidence from the transcript and prior meeting context. Do not invent facts; leave unknown fields empty.',
+    '- If you infer anything that is not directly stated, keep it conservative and base it on visible transcript signals.',
     '- Summary should be 1 to 3 sentences and mention momentum relative to prior meetings when supported by context.',
     '- The `transcript` field in your JSON output must contain the full transcript provided below.',
     trackedTermsPrompt,
@@ -632,7 +647,7 @@ async function analyzeWithGroq(
       { role: 'system', content: systemPrompt },
       { role: 'user', content: `Analyze the following sales call transcript:\n\n${transcript}` }
     ],
-    temperature: 0.2,
+    temperature: 0,
     response_format: { type: 'json_object' },
   });
 
@@ -830,7 +845,7 @@ async function generateExplanationWithGroqLLM(
   const response = await client.chat.completions.create({
     model: DEFAULT_MODEL,
     messages: [{ role: 'user', content: prompt }],
-    temperature: 0.3,
+    temperature: 0,
     response_format: { type: 'json_object' },
   });
 
@@ -893,6 +908,8 @@ export type EvidenceExcerptResponse = {
   sentiment: 'positive' | 'neutral' | 'negative';
   relevance: string;
   timestamp?: string;
+  confidence: 'high' | 'medium' | 'low';
+  source: EvidenceSource;
 };
 
 export type KpiEvidenceResponse = {
@@ -900,6 +917,8 @@ export type KpiEvidenceResponse = {
   kpiName: string;
   kpiValue?: string | number;
   summary: string;
+  confidence: 'high' | 'medium' | 'low';
+  confidenceReason: string;
   excerpts: EvidenceExcerptResponse[];
   transcript: string;
 };
@@ -963,6 +982,70 @@ const KPI_EVIDENCE_CONFIG: Record<string, { name: string; focusAreas: string; ex
   }
 };
 
+function normalizeConfidence(value: unknown): 'high' | 'medium' | 'low' {
+  return value === 'high' || value === 'medium' || value === 'low' ? value : 'medium';
+}
+
+function normalizeQuoteForSearch(value: string): string {
+  return value.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function findTranscriptSource(quote: string, transcript: string, timestamp?: string): EvidenceSource {
+  const normalizedQuote = normalizeQuoteForSearch(quote);
+  const lines = transcript.split(/\r?\n/);
+  const turnIndex = lines.findIndex((line) => normalizeQuoteForSearch(line).includes(normalizedQuote));
+
+  return {
+    type: 'transcript',
+    label: turnIndex >= 0 ? `Transcript turn ${turnIndex + 1}` : 'Transcript excerpt',
+    turnIndex: turnIndex >= 0 ? turnIndex : undefined,
+    timestamp
+  };
+}
+
+function normalizeEvidenceExcerpt(raw: any, transcript: string): EvidenceExcerptResponse {
+  const quote = raw.quote.trim();
+  const timestamp = typeof raw.timestamp === 'string' && raw.timestamp.trim() ? raw.timestamp.trim() : undefined;
+  const source = findTranscriptSource(quote, transcript, timestamp);
+  const quoteFound = source.turnIndex !== undefined || normalizeQuoteForSearch(transcript).includes(normalizeQuoteForSearch(quote));
+  const modelConfidence = normalizeConfidence(raw.confidence);
+  const confidence = quoteFound ? modelConfidence : 'low';
+
+  return {
+    quote,
+    speaker: ['buyer', 'rep', 'unknown'].includes(raw.speaker) ? raw.speaker : 'unknown',
+    sentiment: ['positive', 'neutral', 'negative'].includes(raw.sentiment) ? raw.sentiment : 'neutral',
+    relevance: typeof raw.relevance === 'string' ? raw.relevance : '',
+    timestamp,
+    confidence,
+    source
+  };
+}
+
+function summarizeEvidenceConfidence(excerpts: EvidenceExcerptResponse[]): { confidence: 'high' | 'medium' | 'low'; reason: string } {
+  const highCount = excerpts.filter((excerpt) => excerpt.confidence === 'high').length;
+  const supportedCount = excerpts.filter((excerpt) => excerpt.confidence !== 'low').length;
+
+  if (excerpts.length >= 3 && highCount >= 3) {
+    return {
+      confidence: 'high',
+      reason: `High confidence based on ${excerpts.length} transcript-backed excerpts.`
+    };
+  }
+
+  if (supportedCount >= 1) {
+    return {
+      confidence: 'medium',
+      reason: `Medium confidence based on ${supportedCount} supporting transcript excerpt${supportedCount === 1 ? '' : 's'}.`
+    };
+  }
+
+  return {
+    confidence: 'low',
+    reason: 'Low confidence because the transcript has limited direct evidence for this metric.'
+  };
+}
+
 async function extractKpiEvidenceWithGroqLLM(
   kpiKey: string,
   kpiConfig: { name: string; focusAreas: string; extractionPrompt: string },
@@ -999,23 +1082,27 @@ async function extractKpiEvidenceWithGroqLLM(
     '      "quote": "Exact quote from transcript (keep concise, 1-3 sentences max)",',
     '      "speaker": "buyer" or "rep" or "unknown",',
     '      "sentiment": "positive" or "neutral" or "negative",',
-    '      "relevance": "Brief explanation of why this quote matters for this KPI"',
+    '      "relevance": "Brief explanation of why this quote matters for this KPI",',
+    '      "confidence": "high" or "medium" or "low",',
+    '      "timestamp": "timestamp from transcript if available, otherwise omit"',
     '    }',
     '  ]',
     '}',
     '',
     'Rules:',
     '- Extract 3-8 most relevant excerpts, prioritizing the most impactful quotes',
-    '- Use exact quotes from the transcript (minor cleanup for readability is OK)',
+    '- Use exact quotes from the transcript. Do not paraphrase or invent quotes.',
     '- Keep each quote concise - focus on the key phrase or statement',
     '- Identify speaker as buyer/rep based on context',
-    '- Summary should directly explain the KPI score'
+    '- Set confidence high only when the quote directly supports the KPI; medium for partial support; low for weak or inferred support',
+    '- Summary should directly explain the KPI score',
+    '- Only use the transcript as the source of evidence'
   ].join('\n');
 
   const response = await client.chat.completions.create({
     model: DEFAULT_MODEL,
     messages: [{ role: 'user', content: prompt }],
-    temperature: 0.3,
+    temperature: 0,
     response_format: { type: 'json_object' },
   });
 
@@ -1030,21 +1117,18 @@ async function extractKpiEvidenceWithGroqLLM(
   const excerpts: EvidenceExcerptResponse[] = Array.isArray(parsed.excerpts)
     ? parsed.excerpts
         .filter((e: any) => typeof e.quote === 'string' && e.quote.trim())
-        .map((e: any) => ({
-          quote: e.quote.trim(),
-          speaker: ['buyer', 'rep', 'unknown'].includes(e.speaker) ? e.speaker : 'unknown',
-          sentiment: ['positive', 'neutral', 'negative'].includes(e.sentiment) ? e.sentiment : 'neutral',
-          relevance: typeof e.relevance === 'string' ? e.relevance : '',
-          timestamp: typeof e.timestamp === 'string' ? e.timestamp : undefined
-        }))
+        .map((e: any) => normalizeEvidenceExcerpt(e, transcript))
         .slice(0, 10)
     : [];
+  const confidenceSummary = summarizeEvidenceConfidence(excerpts);
 
   return {
     kpiKey,
     kpiName: kpiConfig.name,
     kpiValue,
     summary: typeof parsed.summary === 'string' ? parsed.summary : `Analysis of ${kpiConfig.name} from conversation.`,
+    confidence: confidenceSummary.confidence,
+    confidenceReason: confidenceSummary.reason,
     excerpts,
     transcript
   };
@@ -1068,6 +1152,8 @@ export async function extractKpiEvidence(request: KpiEvidenceRequest): Promise<K
       kpiName: request.kpiKey,
       kpiValue: request.kpiValue,
       summary: 'Evidence extraction is not available for this metric.',
+      confidence: 'low',
+      confidenceReason: 'No evidence configuration exists for this metric.',
       excerpts: [],
       transcript: request.transcript
     };
@@ -1080,6 +1166,8 @@ export async function extractKpiEvidence(request: KpiEvidenceRequest): Promise<K
       kpiName: kpiConfig.name,
       kpiValue: request.kpiValue,
       summary: 'AI analysis requires API key configuration.',
+      confidence: 'low',
+      confidenceReason: 'No model output was generated because the API key is missing.',
       excerpts: [],
       transcript: request.transcript
     };
@@ -1092,6 +1180,8 @@ export async function extractKpiEvidence(request: KpiEvidenceRequest): Promise<K
       kpiName: kpiConfig.name,
       kpiValue: request.kpiValue,
       summary: 'No transcript available for this meeting. Evidence cannot be extracted.',
+      confidence: 'low',
+      confidenceReason: 'No transcript was available to verify this metric.',
       excerpts: [],
       transcript: ''
     };
@@ -1112,6 +1202,8 @@ export async function extractKpiEvidence(request: KpiEvidenceRequest): Promise<K
       kpiName: kpiConfig.name,
       kpiValue: request.kpiValue,
       summary: 'Unable to extract evidence at this time.',
+      confidence: 'low',
+      confidenceReason: 'Evidence extraction failed before transcript references could be verified.',
       excerpts: [],
       transcript: request.transcript
     };

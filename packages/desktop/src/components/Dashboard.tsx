@@ -2,12 +2,8 @@
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import {
   Activity,
-  AlertTriangle,
   CheckCircle2,
   Clock3,
-  DollarSign,
-  Flame,
-  Heart,
   History,
   LogOut,
   Mic,
@@ -33,7 +29,7 @@ import ExplanationModal, { ExplanationData } from './ExplanationModal';
 import DrillDownModal, { DrillDownData } from './DrillDownModal';
 import InfoButton from './InfoButton';
 import { getKpiMetadata } from './kpiMetadata';
-import { colors, baseStyles, getStatusColor, getStatusBg } from './styles';
+import { colors, baseStyles, shadows } from './styles';
 
 type SentimentLabel = 'Positive' | 'Neutral' | 'Negative';
 type TrendLabel = 'Improving' | 'Declining' | 'Stable';
@@ -197,6 +193,17 @@ export default function Dashboard({ session }: { session: any }) {
 
   useEffect(() => { fetchClients(); }, [session]);
   useEffect(() => { if (selectedClient) fetchMeetings(selectedClient); }, [selectedClient]);
+  useEffect(() => {
+    if (!isRecording) return;
+
+    const preventUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+
+    window.addEventListener('beforeunload', preventUnload);
+    return () => window.removeEventListener('beforeunload', preventUnload);
+  }, [isRecording]);
 
   const fetchClients = async () => {
     try {
@@ -346,6 +353,8 @@ export default function Dashboard({ session }: { session: any }) {
           kpiName: data.kpiName,
           kpiValue: data.kpiValue,
           summary: data.summary,
+          confidence: data.confidence,
+          confidenceReason: data.confidenceReason,
           excerpts: data.excerpts || [],
           transcript: data.transcript || '',
           meetingId: data.meetingId,
@@ -359,6 +368,8 @@ export default function Dashboard({ session }: { session: any }) {
           kpiName: kpiMeta?.label || kpiKey,
           kpiValue,
           summary: errorData.summary || 'Unable to extract evidence. Please ensure you have recorded meetings with transcripts.',
+          confidence: errorData.confidence || 'low',
+          confidenceReason: errorData.confidenceReason || 'No transcript evidence was available to verify this metric.',
           excerpts: [],
           transcript: '',
           icon,
@@ -371,6 +382,8 @@ export default function Dashboard({ session }: { session: any }) {
         kpiName: kpiMeta?.label || kpiKey,
         kpiValue,
         summary: 'Unable to fetch evidence. Please try again later.',
+        confidence: 'low',
+        confidenceReason: 'Evidence could not be loaded for verification.',
         excerpts: [],
         transcript: '',
         icon,
@@ -480,7 +493,6 @@ export default function Dashboard({ session }: { session: any }) {
   const trackedTermSpikes = (summary?.termMonitoring?.trackedTerms || []).filter((item) => item.term && item.spike);
   const productPatterns = collectTopStrings(allSummaries.map((item) => item.dimensions?.product || '').filter(Boolean));
   const geographyPatterns = collectTopStrings(allSummaries.map((item) => item.dimensions?.geography || '').filter(Boolean));
-  const repTenurePatterns = collectTopStrings(allSummaries.map((item) => item.dimensions?.repTenure || '').filter(Boolean));
   const historySentiment = analyzedMeetings.slice().reverse().map((meeting) => {
     const meetingSummary = meeting.summaryJson as MeetingSummary;
     return {
@@ -532,7 +544,7 @@ export default function Dashboard({ session }: { session: any }) {
           </div>
           <span style={baseStyles.brandText}>ClarityIQ</span>
         </div>
-        
+
         <div style={{ padding: '1.5rem', flex: 1, overflowY: 'auto' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
             <span style={{ fontWeight: 600, color: colors.textMuted, fontSize: '0.7rem', letterSpacing: '0.1em', textTransform: 'uppercase' }}>Clients</span>
@@ -573,6 +585,18 @@ export default function Dashboard({ session }: { session: any }) {
                   ...(selectedClient === c.id ? baseStyles.clientItemActive : {}),
                   color: selectedClient === c.id ? colors.primaryLight : colors.textSecondary,
                 }}
+                onMouseEnter={(e) => {
+                  if (selectedClient !== c.id) {
+                    e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.04)';
+                    e.currentTarget.style.borderColor = colors.borderLight;
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  if (selectedClient !== c.id) {
+                    e.currentTarget.style.backgroundColor = 'transparent';
+                    e.currentTarget.style.borderColor = 'transparent';
+                  }
+                }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                   <User size={18} color={selectedClient === c.id ? colors.primary : colors.textMuted} />
@@ -580,7 +604,20 @@ export default function Dashboard({ session }: { session: any }) {
                 </div>
                 <button 
                   onClick={(e) => handleDeleteClient(e, c.id)} 
-                  style={{ ...baseStyles.buttonGhost, color: colors.danger, opacity: 0.7 }} 
+                  style={{ 
+                    ...baseStyles.buttonGhost, 
+                    color: colors.danger, 
+                    opacity: 0.7,
+                    transition: 'all 0.2s ease',
+                  }} 
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.opacity = '1';
+                    e.currentTarget.style.backgroundColor = colors.dangerBg;
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.opacity = '0.7';
+                    e.currentTarget.style.backgroundColor = 'transparent';
+                  }}
                   title="Delete Client"
                 >
                   <Trash2 size={14} />
@@ -596,7 +633,7 @@ export default function Dashboard({ session }: { session: any }) {
               if (session.user?.id === 'demo-user-id') {
                 window.dispatchEvent(new CustomEvent('logout-demo'));
               } else {
-                await supabase.auth.signOut();
+                await supabase?.auth.signOut();
               }
             }}
             style={{ ...baseStyles.buttonGhost, width: '100%', justifyContent: 'flex-start', gap: '0.75rem', color: colors.textMuted }}
@@ -616,36 +653,77 @@ export default function Dashboard({ session }: { session: any }) {
                 <h1 style={baseStyles.pageTitle}>{selectedClientName}</h1>
                 <p style={baseStyles.pageSubtitle}>Revenue intelligence & deal insights</p>
               </div>
-              {isRecording ? (
-                <button onClick={stopMeeting} style={baseStyles.buttonDanger}>
-                  <Square size={18} fill="white" /> Stop Recording
-                </button>
-              ) : isProcessing ? (
-                <div style={baseStyles.processingBadge}>
-                  <Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} />
-                  Analyzing with AI...
-                </div>
-              ) : (
-                <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
-                  <button onClick={startMeeting} style={baseStyles.buttonSuccess}>
-                    <Mic size={18} /> Start Meeting
-                  </button>
-                  <button
-                    onClick={() => fileInputRef.current?.click()}
-                    style={baseStyles.buttonPrimary}
-                    title="Upload an audio file for AI analysis"
-                  >
-                    <Upload size={18} /> Upload Audio
-                  </button>
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept="audio/*"
-                    style={{ display: 'none' }}
-                    onChange={handleUploadAudio}
-                  />
-                </div>
-              )}
+              <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+                {isRecording ? (
+                      <button 
+                        onClick={stopMeeting} 
+                        style={{ 
+                          ...baseStyles.buttonDanger,
+                          transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.boxShadow = `0 12px 32px ${colors.dangerGlow}`;
+                          e.currentTarget.style.transform = 'translateY(-2px)';
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.boxShadow = `0 8px 24px ${colors.dangerGlow}`;
+                          e.currentTarget.style.transform = 'translateY(0)';
+                        }}
+                      >
+                        <Square size={18} fill="white" /> Stop Recording
+                      </button>
+                    ) : isProcessing ? (
+                      <div style={baseStyles.processingBadge}>
+                        <Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} />
+                        Analyzing with AI...
+                      </div>
+                    ) : (
+                      <>
+                        <button 
+                          onClick={startMeeting} 
+                          style={{ 
+                            ...baseStyles.buttonSuccess,
+                            transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.boxShadow = `0 12px 32px ${colors.successGlow}`;
+                            e.currentTarget.style.transform = 'translateY(-2px)';
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.boxShadow = `0 8px 24px ${colors.successGlow}`;
+                            e.currentTarget.style.transform = 'translateY(0)';
+                          }}
+                        >
+                          <Mic size={18} /> Start Meeting
+                        </button>
+                        <button
+                          onClick={() => fileInputRef.current?.click()}
+                          style={{ 
+                            ...baseStyles.buttonPrimary,
+                            transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.boxShadow = shadows.buttonHover;
+                            e.currentTarget.style.transform = 'translateY(-2px)';
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.boxShadow = shadows.button;
+                            e.currentTarget.style.transform = 'translateY(0)';
+                          }}
+                          title="Upload an audio file for AI analysis"
+                        >
+                          <Upload size={18} /> Upload Audio
+                        </button>
+                        <input
+                          ref={fileInputRef}
+                          type="file"
+                          accept="audio/*"
+                          style={{ display: 'none' }}
+                          onChange={handleUploadAudio}
+                        />
+                      </>
+                    )}
+              </div>
             </div>
 
             {/* KPI Cards Grid */}
@@ -653,32 +731,55 @@ export default function Dashboard({ session }: { session: any }) {
               {kpis.map(({ key, label, value, helper, icon: Icon, accent }) => (
                 <div 
                   key={key} 
-                  style={{ ...baseStyles.kpiCard, cursor: 'pointer', transition: 'all 0.2s ease' }}
+                  style={{ 
+                    ...baseStyles.kpiCard, 
+                    cursor: 'pointer', 
+                    transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                    position: 'relative',
+                    overflow: 'hidden',
+                  }}
                   onClick={() => fetchDrillDown(key, value, <Icon size={24} />)}
                   onMouseEnter={(e) => {
-                    e.currentTarget.style.transform = 'translateY(-2px)';
-                    e.currentTarget.style.boxShadow = '0 12px 40px rgba(0, 0, 0, 0.3)';
-                    e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.15)';
+                    e.currentTarget.style.transform = 'translateY(-4px)';
+                    e.currentTarget.style.boxShadow = `0 20px 60px rgba(0, 0, 0, 0.5), 0 0 40px ${accent}30`;
+                    e.currentTarget.style.borderColor = `${accent}60`;
                   }}
                   onMouseLeave={(e) => {
                     e.currentTarget.style.transform = 'translateY(0)';
-                    e.currentTarget.style.boxShadow = 'none';
-                    e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.08)';
+                    e.currentTarget.style.boxShadow = '0 10px 40px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.2)';
+                    e.currentTarget.style.borderColor = colors.border;
                   }}
                   title="Click to see evidence from transcript"
                 >
-                  <div style={{ position: 'absolute', top: 0, right: 0, width: '100px', height: '100px', background: `radial-gradient(circle at top right, ${accent}20, transparent)`, borderRadius: '0 20px 0 0' }} />
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem', position: 'relative' }}>
+                  {/* Gradient accent overlay */}
+                  <div style={{ 
+                    position: 'absolute', 
+                    top: 0, 
+                    right: 0, 
+                    width: '140px', 
+                    height: '140px', 
+                    background: `radial-gradient(circle at top right, ${accent}25, transparent 70%)`, 
+                    borderRadius: '0 24px 0 0',
+                    pointerEvents: 'none',
+                  }} />
+                  
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1.25rem', position: 'relative', zIndex: 1 }}>
                     <span style={{ ...baseStyles.kpiLabel, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                       {label}
-                      <InfoButton onClick={(e) => { e.stopPropagation(); fetchExplanation(key, value, <Icon size={24} />); }} color={colors.textMuted} hoverColor={colors.primary} />
+                      <InfoButton onClick={(e) => { if (e) e.stopPropagation(); fetchExplanation(key, value, <Icon size={24} />); }} color={colors.textMuted} hoverColor={colors.primary} />
                     </span>
-                    <div style={{ ...baseStyles.iconBox, background: `${accent}20`, color: accent }}>
+                    <div style={{ 
+                      ...baseStyles.iconBox, 
+                      background: `linear-gradient(135deg, ${accent}30, ${accent}15)`,
+                      color: accent,
+                      border: `1px solid ${accent}40`,
+                      boxShadow: `0 4px 16px ${accent}20`,
+                    }}>
                       <Icon size={22} />
                     </div>
                   </div>
-                  <div style={baseStyles.kpiValue}>{value}</div>
-                  <div style={baseStyles.kpiHelper}>{helper}</div>
+                  <div style={{ ...baseStyles.kpiValue, position: 'relative', zIndex: 1 }}>{value}</div>
+                  <div style={{ ...baseStyles.kpiHelper, position: 'relative', zIndex: 1 }}>{helper}</div>
                 </div>
               ))}
             </div>
@@ -686,7 +787,19 @@ export default function Dashboard({ session }: { session: any }) {
             {/* Two Column Layout: Sentiment & Buyer Engagement */}
             <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: '1.5rem', marginBottom: '1.5rem' }}>
               {/* Sentiment Panel */}
-              <div style={baseStyles.card}>
+              <div style={{ 
+                ...baseStyles.card,
+                transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.borderColor = colors.borderLight;
+                e.currentTarget.style.boxShadow = '0 20px 60px rgba(0, 0, 0, 0.5)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.borderColor = colors.border;
+                e.currentTarget.style.boxShadow = '0 10px 40px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.2)';
+              }}
+              >
                 <h3 style={baseStyles.sectionTitle}>
                   <Activity size={18} color={colors.primary} />
                   Sentiment & Funnel Risk
@@ -741,7 +854,19 @@ export default function Dashboard({ session }: { session: any }) {
               </div>
 
               {/* Buyer Engagement */}
-              <div style={baseStyles.card}>
+              <div style={{ 
+                ...baseStyles.card,
+                transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.borderColor = colors.borderLight;
+                e.currentTarget.style.boxShadow = '0 20px 60px rgba(0, 0, 0, 0.5)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.borderColor = colors.border;
+                e.currentTarget.style.boxShadow = '0 10px 40px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.2)';
+              }}
+              >
                 <h3 style={baseStyles.sectionTitle}>
                   <Users size={18} color={colors.info} />
                   Buyer Engagement
@@ -771,7 +896,21 @@ export default function Dashboard({ session }: { session: any }) {
             {/* Three Column: Deal Health, Buying Signals, Rep Effectiveness */}
             <div style={baseStyles.gridThree}>
               {/* Deal Health */}
-              <div style={baseStyles.card}>
+              <div style={{ 
+                ...baseStyles.card,
+                transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.borderColor = colors.borderLight;
+                e.currentTarget.style.boxShadow = '0 20px 60px rgba(0, 0, 0, 0.5)';
+                e.currentTarget.style.transform = 'translateY(-2px)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.borderColor = colors.border;
+                e.currentTarget.style.boxShadow = '0 10px 40px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.2)';
+                e.currentTarget.style.transform = 'translateY(0)';
+              }}
+              >
                 <h3 style={baseStyles.sectionTitle}>
                   <TrendingUp size={18} color={colors.success} />
                   Deal Health
@@ -779,7 +918,7 @@ export default function Dashboard({ session }: { session: any }) {
                 </h3>
                 {summary ? (
                   <>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', padding: '1rem', backgroundColor: 'rgba(255,255,255,0.02)', borderRadius: '12px', marginBottom: '1rem' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', padding: '1rem', backgroundColor: 'rgba(255,255,255,0.02)', borderRadius: '12px', marginBottom: '1rem', border: `1px solid ${colors.border}` }}>
                       <div style={{ padding: '0.75rem', borderRadius: '50%', backgroundColor: 'rgba(255,255,255,0.05)' }}>
                         {renderMomentumIcon(summary.dealArc?.momentum)}
                       </div>
@@ -803,7 +942,21 @@ export default function Dashboard({ session }: { session: any }) {
               </div>
 
               {/* Buying Signals */}
-              <div style={baseStyles.card}>
+              <div style={{ 
+                ...baseStyles.card,
+                transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.borderColor = colors.borderLight;
+                e.currentTarget.style.boxShadow = '0 20px 60px rgba(0, 0, 0, 0.5)';
+                e.currentTarget.style.transform = 'translateY(-2px)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.borderColor = colors.border;
+                e.currentTarget.style.boxShadow = '0 10px 40px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.2)';
+                e.currentTarget.style.transform = 'translateY(0)';
+              }}
+              >
                 <h3 style={baseStyles.sectionTitle}>
                   <Target size={18} color={colors.warning} />
                   Buying Signals
@@ -830,7 +983,21 @@ export default function Dashboard({ session }: { session: any }) {
               </div>
 
               {/* Rep Effectiveness */}
-              <div style={baseStyles.card}>
+              <div style={{ 
+                ...baseStyles.card,
+                transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.borderColor = colors.borderLight;
+                e.currentTarget.style.boxShadow = '0 20px 60px rgba(0, 0, 0, 0.5)';
+                e.currentTarget.style.transform = 'translateY(-2px)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.borderColor = colors.border;
+                e.currentTarget.style.boxShadow = '0 10px 40px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.2)';
+                e.currentTarget.style.transform = 'translateY(0)';
+              }}
+              >
                 <h3 style={baseStyles.sectionTitle}>
                   <CheckCircle2 size={18} color={colors.primary} />
                   Rep Effectiveness
@@ -864,7 +1031,21 @@ export default function Dashboard({ session }: { session: any }) {
             {/* Two Column: Risk & Patterns */}
             <div style={baseStyles.gridTwo}>
               {/* Risk Indicators */}
-              <div style={baseStyles.card}>
+              <div style={{ 
+                ...baseStyles.card,
+                transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.borderColor = colors.borderLight;
+                e.currentTarget.style.boxShadow = '0 20px 60px rgba(0, 0, 0, 0.5)';
+                e.currentTarget.style.transform = 'translateY(-2px)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.borderColor = colors.border;
+                e.currentTarget.style.boxShadow = '0 10px 40px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.2)';
+                e.currentTarget.style.transform = 'translateY(0)';
+              }}
+              >
                 <h3 style={baseStyles.sectionTitle}>
                   <ShieldAlert size={18} color={colors.danger} />
                   Risk & Loss Indicators
@@ -892,7 +1073,21 @@ export default function Dashboard({ session }: { session: any }) {
               </div>
 
               {/* Pattern Trace */}
-              <div style={baseStyles.card}>
+              <div style={{ 
+                ...baseStyles.card,
+                transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.borderColor = colors.borderLight;
+                e.currentTarget.style.boxShadow = '0 20px 60px rgba(0, 0, 0, 0.5)';
+                e.currentTarget.style.transform = 'translateY(-2px)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.borderColor = colors.border;
+                e.currentTarget.style.boxShadow = '0 10px 40px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.2)';
+                e.currentTarget.style.transform = 'translateY(0)';
+              }}
+              >
                 <h3 style={baseStyles.sectionTitle}>
                   <Sparkles size={18} color={colors.primaryLight} />
                   Pattern Trace
@@ -920,7 +1115,7 @@ export default function Dashboard({ session }: { session: any }) {
             {/* History */}
             <div style={baseStyles.card}>
               <h3 style={baseStyles.sectionTitle}>
-                <History size={18} color={colors.textSecondary} />
+                <History size={18} color={colors.primary} />
                 Meeting History
                 <InfoButton onClick={() => fetchExplanation('historicalSentiment', undefined)} color={colors.textMuted} hoverColor={colors.primary} />
               </h3>
@@ -928,16 +1123,41 @@ export default function Dashboard({ session }: { session: any }) {
                 <p style={{ color: colors.textMuted, margin: 0 }}>No meetings recorded yet.</p>
               ) : (
                 <div>
-                  {historySentiment.map((item) => (
-                    <div key={item.id} style={{ ...baseStyles.historyRow, ':hover': { backgroundColor: 'rgba(255,255,255,0.05)' } }}>
-                      <span style={{ color: colors.textSecondary }}>{new Date(item.createdAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}</span>
-                      <span style={{ fontWeight: 700, color: getSentimentColor(item.score !== null ? (item.score >= 70 ? 'Positive' : item.score <= 40 ? 'Negative' : 'Neutral') : 'Neutral') }}>
-                        {item.score !== null ? `${item.score}/100` : '--'}
-                      </span>
-                      <span style={{ fontWeight: 600, color: getTrendColor(item.trend) }}>{item.trend}</span>
-                      <Pill text={item.momentum} variant={item.momentum === 'Increasing' ? 'success' : item.momentum === 'Cooling' ? 'danger' : 'default'} />
-                    </div>
-                  ))}
+                  {historySentiment.map((item) => {
+                    return (
+                      <div key={item.id} style={{ 
+                        ...baseStyles.historyRow, 
+                        display: 'flex', 
+                        alignItems: 'center', 
+                        gap: '12px',
+                        padding: '16px 20px',
+                        transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
+                        cursor: 'pointer',
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.06)';
+                        e.currentTarget.style.borderColor = colors.borderLight;
+                        e.currentTarget.style.transform = 'translateX(4px)';
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.03)';
+                        e.currentTarget.style.borderColor = colors.border;
+                        e.currentTarget.style.transform = 'translateX(0)';
+                      }}
+                      >
+                        <span style={{ color: colors.textSecondary, flex: '0 0 180px', fontSize: '0.9rem' }}>
+                          {new Date(item.createdAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}
+                        </span>
+                        <span style={{ fontWeight: 700, color: getSentimentColor(item.score !== null ? (item.score >= 70 ? 'Positive' : item.score <= 40 ? 'Negative' : 'Neutral') : 'Neutral'), flex: '0 0 60px', fontSize: '1rem' }}>
+                          {item.score !== null ? `${item.score}/100` : '--'}
+                        </span>
+                        <span style={{ fontWeight: 600, color: getTrendColor(item.trend), flex: '0 0 80px', fontSize: '0.9rem' }}>{item.trend}</span>
+                        <div style={{ flex: '0 0 100px' }}>
+                          <Pill text={item.momentum} variant={item.momentum === 'Increasing' ? 'success' : item.momentum === 'Cooling' ? 'danger' : 'default'} />
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>

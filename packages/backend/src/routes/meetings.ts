@@ -235,6 +235,8 @@ router.post('/:meetingId/evidence', async (req, res) => {
         kpiKey,
         kpiName: kpiKey,
         summary: 'This meeting does not have a transcript available for evidence extraction.',
+        confidence: 'low',
+        confidenceReason: 'No transcript was available to verify this metric.',
         excerpts: [],
         transcript: ''
       });
@@ -281,6 +283,8 @@ router.post('/client/:clientId/evidence', async (req, res) => {
         kpiKey,
         kpiName: kpiKey,
         summary: 'No meetings have been recorded for this client yet.',
+        confidence: 'low',
+        confidenceReason: 'No meeting transcript was available to verify this metric.',
         excerpts: [],
         transcript: ''
       });
@@ -295,6 +299,8 @@ router.post('/client/:clientId/evidence', async (req, res) => {
         kpiKey,
         kpiName: kpiKey,
         summary: 'The latest meeting does not have a transcript available for evidence extraction.',
+        confidence: 'low',
+        confidenceReason: 'No transcript was available to verify this metric.',
         excerpts: [],
         transcript: ''
       });
